@@ -4,6 +4,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::io::Read;
 use std::mem::ManuallyDrop;
+use std::num::TryFromIntError;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
@@ -16,11 +17,24 @@ impl Decode for Index {
     }
 }
 
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn out_of_range_panic() -> ! {
+    panic!("index has to fit in a u32")
+}
+
+fn unwrap_index_error<T>(res: Result<T, TryFromIntError>) -> T {
+    match res {
+        Ok(x) => x,
+        Err(_) => out_of_range_panic()
+    }
+}
+
 impl Index {
-    pub fn from_usize(index: usize) -> Index {
-        u32::try_from(index)
-            .map(Self)
-            .expect("index has to fit in a u32")
+    pub fn try_from_usize(index: usize) -> Result<Index, TryFromIntError> {
+        u32::try_from(index).map(Self)
     }
 
     pub fn as_usize(self) -> usize {
@@ -44,6 +58,10 @@ unsafe impl<T: Send> Send for WasmVec<T> {}
 unsafe impl<T: Sync> Sync for WasmVec<T> {}
 
 impl<T> WasmVec<T> {
+    pub fn from_box(bx: Box<[T]>) -> Self {
+        unwrap_index_error(Self::try_from(bx))
+    }
+    
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
@@ -69,18 +87,19 @@ impl<T> DerefMut for WasmVec<T> {
 
 impl<T: Clone> Clone for WasmVec<T> {
     fn clone(&self) -> Self {
-        Self::from(Box::<[T]>::from(&**self))
+        Self::from_box(Box::<[T]>::from(&**self))
     }
 }
 
-impl<T> From<Box<[T]>> for WasmVec<T> {
-    fn from(value: Box<[T]>) -> Self {
-        let len = Index::from_usize(value.len());
+impl<T> TryFrom<Box<[T]>> for WasmVec<T> {
+    type Error = TryFromIntError;
+    fn try_from(value: Box<[T]>) -> Result<Self, Self::Error> {
+        let len = Index::try_from_usize(value.len())?;
         let ptr = Box::into_raw(value) as *mut T;
-        WasmVec {
+        Ok(WasmVec {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
             len,
-        }
+        })
     }
 }
 
@@ -105,7 +124,7 @@ impl<T: Decode> Decode for WasmVec<T> {
         (0..len)
             .map(|_| T::decode(file))
             .collect::<Result<Box<[_]>, _>>()
-            .map(Self::from)
+            .map(Self::from_box)
     }
 }
 

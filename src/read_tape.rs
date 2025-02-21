@@ -1,8 +1,6 @@
-use integer_encoding::VarInt;
 use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 
 const BUF_SIZE: usize = 8096;
@@ -110,56 +108,62 @@ impl<R: Read> ReadTape<R> {
     }
 }
 
-pub trait Int: VarInt {
-    const MAX_SIZE: usize;
+mod sealed {
+    use std::io;
+    use std::io::Read;
+    use crate::read_tape::ReadTape;
+
+    pub trait Sealed: Sized {
+        fn read_leb128<R: Read>(reader: &mut ReadTape<R>) -> io::Result<Self>;
+    }
 }
 
-impl<VI: VarInt> Int for VI {
-    const MAX_SIZE: usize = (size_of::<Self>() * 8 + 7) / 7;
-}
+pub trait Int: sealed::Sealed {}
 
-const CONTINUE_BIT: u8 = 0b1000_0000;
+impl<T: sealed::Sealed> Int for T {}
 
-struct Leb128Parser<T: Int> {
-    buf: [u8; 10],
-    i: usize,
-    _marker: PhantomData<T>,
-}
+const CONTINUE_BIT: u8 = 0b10000000;
+const SIGN_BIT: u8     = 0b010000000;
+const DATA_BITS: u8 = !CONTINUE_BIT;
 
-impl<T: Int> Leb128Parser<T> {
-    pub fn new() -> Self {
-        Leb128Parser {
-            buf: [0; 10],
-            i: 0,
-            _marker: PhantomData,
+macro_rules! impl_int {
+    ($($t: ty)*) => {$(
+        impl sealed::Sealed for $t {
+            fn read_leb128<R: Read>(reader: &mut ReadTape<R>) -> io::Result<Self> {
+                let mut result = 0 as $t;
+                let mut shift = 0;
+                let mut byte;
+                loop {
+                    byte = reader.read_byte()?;
+                    // as per the spec one shall continue to read data even if there is runoff
+                    result |= ((byte & DATA_BITS) as $t) << shift;
+                    shift += 7;
+                    if byte & CONTINUE_BIT == 0 {
+                        break
+                    }
+                }
+                
+                #[allow(unused_comparisons)]
+                const IS_SIGNED: bool = const { <$t>::MIN < 0 };
+                
+                if IS_SIGNED && shift < <$t>::BITS && (byte & SIGN_BIT != 0) {
+                    /* sign extend */
+                    result |= ((!0) << shift);
+                }
+                
+                Ok(result)
+            }
         }
-    }
-    pub fn push(&mut self, b: u8) -> io::Result<()> {
-        if self.i >= T::MAX_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unterminated varint",
-            ));
-        }
-        self.buf[self.i] = b;
-        self.i += 1;
-        Ok(())
-    }
-    pub fn finished(&self) -> bool {
-        self.i > 0 && (self.buf[self.i - 1] & CONTINUE_BIT == 0)
-    }
-    pub fn decode<VI: VarInt>(&self) -> Option<VI> {
-        Some(VI::decode_var(&self.buf[0..self.i])?.0)
-    }
+    )*};
+}
+
+impl_int! {
+    i8 i16 i32 i64 i128
+    u8 u16 u32 u64 u128
 }
 
 impl<R: Read> ReadTape<R> {
-    pub fn read_leb128<VI: Int>(&mut self) -> io::Result<VI> {
-        let mut p = Leb128Parser::<VI>::new();
-        while !p.finished() {
-            p.push(self.read_byte()?)?;
-        }
-        p.decode()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "leb128 integer too long"))
+    pub fn read_leb128<I: Int>(&mut self) -> io::Result<I> {
+        I::read_leb128(self)
     }
 }

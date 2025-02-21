@@ -118,12 +118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integer-encoding"
-version = "4.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d762194228a2f1c11063e46e32e5acb96e66e906382b9eb5441f2e0504bbd5a"
-
-[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -187,7 +181,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "int-enum",
- "integer-encoding",
  "nom",
  "thiserror",
 ]

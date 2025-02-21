@@ -1,8 +1,10 @@
 use crate::read_tape::ReadTape;
-use nom::Parser;
 use std::error::Error;
 use std::io::{self, Read, Result};
 use std::marker::PhantomData;
+use crate::frontend::vector::WasmVec;
+
+mod vector;
 
 fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
@@ -26,7 +28,7 @@ where
 #[derive(Debug)]
 struct TodoDecode<const N: usize>;
 impl<const N: usize> Decode for TodoDecode<N> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(_: &mut ReadTape<impl Read>) -> Result<Self> {
         todo!("todo decode#{}", N)
     }
 }
@@ -174,13 +176,6 @@ decodable! {
 
 type Length = PhantomData<usize>;
 
-impl<T: Decode> Decode for Box<[T]> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let len = u32::decode(file)?;
-        (0..len).map(|_| T::decode(file)).collect()
-    }
-}
-
 #[derive(Debug)]
 struct TagByte<const TAG: u8>;
 impl<const TAG: u8> Decode for TagByte<TAG> {
@@ -194,13 +189,13 @@ decodable! {
     #[derive(Debug)]
     struct FuncType {
         _signature: TagByte<0x60>,
-        parameters: Box<[ValueType]>,
-        result: Box<[ValueType]>,
+        parameters: WasmVec<ValueType>,
+        result: WasmVec<ValueType>,
     }
 
     #[derive(Debug)]
     struct TypeSection {
-        functions: Box<[FuncType]>,
+        functions: WasmVec<FuncType>,
     }
 }
 
@@ -231,7 +226,7 @@ decodable! {
 
     #[derive(Debug)]
     struct ImportSection {
-        imports: Box<[Import]>,
+        imports: WasmVec<Import>,
     }
 
     #[derive(Debug)]
@@ -242,7 +237,7 @@ decodable! {
 
     #[derive(Debug)]
     struct ExportSection {
-        exports: Box<[Export]>,
+        exports: WasmVec<Export>,
     }
 
     #[derive(Debug)]
@@ -252,30 +247,30 @@ decodable! {
 
     #[derive(Debug)]
     enum Element: u32 {
-        Case00(Expression, Box<[FunctionIdx]>) = 0x00,
-        Case01(ElementKind, Box<[FunctionIdx]>) = 0x01,
-        Case02(TableIdx, Expression, ElementKind, Box<[FunctionIdx]>) = 0x02,
-        Case03(ElementKind, Box<[FunctionIdx]>) = 0x03,
-        Case04(Expression, Box<[Expression]>) = 0x04,
-        Case05(ValueType, Box<[Expression]>) = 0x05,
-        Case06(TableIdx, Expression, ValueType, Box<[Expression]>) = 0x06,
-        Case07(ValueType, Box<[Expression]>) = 0x07,
+        Case00(Expression, WasmVec<FunctionIdx>) = 0x00,
+        Case01(ElementKind, WasmVec<FunctionIdx>) = 0x01,
+        Case02(TableIdx, Expression, ElementKind, WasmVec<FunctionIdx>) = 0x02,
+        Case03(ElementKind, WasmVec<FunctionIdx>) = 0x03,
+        Case04(Expression, WasmVec<Expression>) = 0x04,
+        Case05(ValueType, WasmVec<Expression>) = 0x05,
+        Case06(TableIdx, Expression, ValueType, WasmVec<Expression>) = 0x06,
+        Case07(ValueType, WasmVec<Expression>) = 0x07,
     }
 
     #[derive(Debug)]
     struct ElementSection {
-        elements: Box<[Element]>,
+        elements: WasmVec<Element>,
     }
 
     #[derive(Debug)]
     struct CodeSection {
-        definitions: Box<[Definition]>,
+        definitions: WasmVec<Definition>,
     }
 }
 
 #[derive(Debug)]
 struct Definition {
-    locals: Box<[ValueType]>,
+    locals: WasmVec<ValueType>,
     body: Expression,
 }
 
@@ -296,7 +291,8 @@ impl Decode for Definition {
                 &std::iter::repeat_n(value_type, run_length).collect::<Box<_>>(),
             );
         }
-        let locals = locals.into_boxed_slice();
+        let locals = WasmVec::try_from(locals.into_boxed_slice())
+            .map_err(|_| invalid_data("too many functions"))?;
         let body = Expression::decode(file)?;
         Ok(Definition { locals, body })
     }
@@ -318,7 +314,7 @@ type GlobalType = TodoDecode<103>;
 decodable! {
     #[derive(Debug)]
     struct FunctionSection {
-        signatures: Box<[TypeIdx]>,
+        signatures: WasmVec<TypeIdx>,
     }
 }
 
@@ -337,12 +333,12 @@ decodable! {
 
     #[derive(Debug)]
     struct TableSection {
-        tables: Box<[TableType]>,
+        tables: WasmVec<TableType>,
     }
 
     #[derive(Debug)]
     struct MemorySection {
-        memories: Box<[Limit]>,
+        memories: WasmVec<Limit>,
     }
 
     #[derive(Debug)]
@@ -354,7 +350,7 @@ decodable! {
 
     #[derive(Debug)]
     struct GlobalSection {
-        globals: Box<[Global]>,
+        globals: WasmVec<Global>,
     }
 
     #[derive(Debug)]
@@ -383,7 +379,6 @@ decodable! {
         ConstF64(f64) = 0x44,
         AddI32 = 0x6a,
         SubI32 = 0x6b,
-        StoreI32(Mem)
     }
 }
 
