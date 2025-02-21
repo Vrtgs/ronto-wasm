@@ -130,6 +130,9 @@ macro_rules! impl_int {
     ($($t: ty)*) => {$(
         impl sealed::Sealed for $t {
             fn read_leb128<R: Read>(reader: &mut ReadTape<R>) -> io::Result<Self> {
+                #[allow(unused_comparisons)]
+                const IS_SIGNED: bool = const { <$t>::MIN < 0 };
+                
                 let mut result = 0 as $t;
                 let mut shift = 0;
                 let mut byte;
@@ -137,14 +140,12 @@ macro_rules! impl_int {
                     byte = reader.read_byte()?;
                     // as per the spec one shall continue to read data even if there is runoff
                     result |= ((byte & DATA_BITS) as $t) << shift;
-                    shift += 7;
+                    if IS_SIGNED { shift += 7 }
                     if byte & CONTINUE_BIT == 0 {
                         break
                     }
+                    if !IS_SIGNED { shift += 7 }
                 }
-                
-                #[allow(unused_comparisons)]
-                const IS_SIGNED: bool = const { <$t>::MIN < 0 };
                 
                 if IS_SIGNED && shift < <$t>::BITS && (byte & SIGN_BIT != 0) {
                     /* sign extend */
