@@ -371,6 +371,8 @@ decodable! {
         Loop(Expression) = 0x03,
         IfElse(IfElseBlock) = 0x04,
         Return = 0x0f,
+        Call(FunctionIdx) = 0x10,
+        CallIndirect(TypeIdx, TableIdx) = 0x11,
         Drop = 0x1a,
         LocalGet(LocalIdx) = 0x20,
         LocalSet(LocalIdx) = 0x21,
