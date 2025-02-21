@@ -377,13 +377,16 @@ decodable! {
         LocalTee(LocalIdx) = 0x22,
         GlobalGet(GlobalIdx) = 0x23,
         GlobalSet(GlobalIdx) = 0x24,
+        StoreI32(MemoryArgument) = 0x36,
+        StoreI64(MemoryArgument) = 0x37,
+        StoreF32(MemoryArgument) = 0x38,
+        StoreF64(MemoryArgument) = 0x39,
         ConstI32(i32) = 0x41,
         ConstI64(i64) = 0x42,
         ConstF32(f32) = 0x43,
         ConstF64(f64) = 0x44,
         AddI32 = 0x6a,
         SubI32 = 0x6b,
-        StoreI32(Mem)
     }
 }
 
