@@ -100,25 +100,25 @@ impl<R: Read> BufferedRead<R> {
 
 
 
-pub trait BoundedVarInt: VarInt {
+pub trait Int: VarInt {
     const MAX_SIZE: usize;
 }
 
-impl<VI: VarInt> BoundedVarInt for VI {
+impl<VI: VarInt> Int for VI {
     const MAX_SIZE: usize = (size_of::<Self>() * 8 + 7) / 7;
 }
 
 const CONTINUE_BIT: u8 = 0b1000_0000;
 
-struct VarIntProcessor<T: BoundedVarInt> {
+struct Leb128Parser<T: Int> {
     buf: [u8; 10],
     i: usize,
     _marker: PhantomData<T>,
 }
 
-impl<T: BoundedVarInt> VarIntProcessor<T> {
+impl<T: Int> Leb128Parser<T> {
     pub fn new() -> Self {
-        VarIntProcessor {
+        Leb128Parser {
             buf: [0; 10],
             i: 0,
             _marker: PhantomData,
@@ -144,8 +144,8 @@ impl<T: BoundedVarInt> VarIntProcessor<T> {
 }
 
 impl<R: Read> BufferedRead<R> {
-    pub fn read_varint<VI: BoundedVarInt>(&mut self) -> io::Result<VI> {
-        let mut p = VarIntProcessor::<VI>::new();
+    pub fn read_leb128<VI: Int>(&mut self) -> io::Result<VI> {
+        let mut p = Leb128Parser::<VI>::new();
         while !p.finished() {
             p.push(self.next_byte()?)?;
         }
