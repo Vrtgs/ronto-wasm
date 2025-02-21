@@ -91,7 +91,7 @@ impl<R: Read> ReadTape<R> {
     }
 
     pub fn has_data(&mut self) -> io::Result<bool> {
-        Ok(self.scratch.is_empty() && {
+        Ok(!self.scratch.is_empty() && {
             fill!(self, return Ok(false));
             true
         })
@@ -128,7 +128,7 @@ impl<T: Int> Leb128Parser<T> {
         if self.i >= T::MAX_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Unterminated varint",
+                "unterminated varint",
             ));
         }
         self.buf[self.i] = b;
