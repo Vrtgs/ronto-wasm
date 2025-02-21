@@ -27,7 +27,7 @@ impl<R: Read> BufferedRead<R> {
             if amt == 0 {
                 return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
             }
-            self.scratch.extend(buff[..amt].iter().copied())
+            self.scratch.extend(&buff[..amt])
         }
 
         Ok(())
