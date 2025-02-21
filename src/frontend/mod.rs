@@ -414,6 +414,8 @@ decodable! {
         ShruI32 = 0x76,
         RotlI32 = 0x77,
         RotrI32 = 0x78,
+        MemorySize(TagByte<0x00>) = 0x3f,
+        MemoryGrow(TagByte<0x00>) = 0x40,
     }
 }
 
