@@ -10,6 +10,11 @@ fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
+fn vector_from_vec<T>(vec: Vec<T>) -> Result<WasmVec<T>> {
+    WasmVec::try_from(vec.into_boxed_slice())
+        .map_err(|_|invalid_data("vector type too long"))
+}
+
 macro_rules! expect {
     ($condition:expr, $($errmsg:tt)*) => {
         match $condition {
@@ -291,8 +296,7 @@ impl Decode for Definition {
                 &std::iter::repeat_n(value_type, run_length).collect::<Box<_>>(),
             );
         }
-        let locals = WasmVec::try_from(locals.into_boxed_slice())
-            .map_err(|_| invalid_data("too many functions"))?;
+        let locals = vector_from_vec(locals)?;
         let body = Expression::decode(file)?;
         Ok(Definition { locals, body })
     }
@@ -450,7 +454,7 @@ impl Decode for IfElseBlock {
         }
 
         let ifso = Expression {
-            instructions: ifso.into_boxed_slice(),
+            instructions: vector_from_vec(ifso)?,
         };
         if file.read_byte()? == INSTRUCTION_ELSE {
             let ifnot = Expression::decode(file)?;
@@ -466,7 +470,7 @@ const INSTRUCTION_END: u8 = 0x0B;
 
 #[derive(Debug)]
 struct Expression {
-    instructions: Box<[Instruction]>,
+    instructions: WasmVec<Instruction>,
 }
 
 impl Decode for Expression {
@@ -479,7 +483,7 @@ impl Decode for Expression {
         let _ = file.read_byte();
 
         Ok(Expression {
-            instructions: instructions.into_boxed_slice(),
+            instructions: vector_from_vec(instructions)?,
         })
     }
 }
