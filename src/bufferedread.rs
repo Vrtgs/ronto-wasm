@@ -12,6 +12,19 @@ pub struct BufferedRead<R: Read> {
     scratch: VecDeque<u8>,
 }
 
+macro_rules! fill {
+    ($self: ident, $($eof_handler: tt)*) => {'fill: {
+        let mut buff = [0; BUF_SIZE];
+        let amt = $self.reader.read(&mut buff)?;
+        if amt == 0 {
+            $($eof_handler)*;
+
+            #[allow(unreachable_code)] { break 'fill }
+        }
+        $self.scratch.extend(&buff[..amt])
+    }};
+}
+
 impl<R: Read> BufferedRead<R> {
     pub fn new(reader: R) -> Self {
         Self {
@@ -22,18 +35,13 @@ impl<R: Read> BufferedRead<R> {
 
     pub fn fill_buff(&mut self, n: usize) -> io::Result<()> {
         while self.scratch.len() < n {
-            let mut buff = [0; BUF_SIZE];
-            let amt = self.reader.read(&mut buff)?;
-            if amt == 0 {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
-            self.scratch.extend(&buff[..amt])
+            fill!(self, return Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
         }
 
         Ok(())
     }
 
-    pub fn read_exact(&mut self, buf: &mut [MaybeUninit<u8>]) -> io::Result<()> {
+    fn read_exact(&mut self, buf: &mut [MaybeUninit<u8>]) -> io::Result<()> {
         self.fill_buff(buf.len())?;
 
         let copy_into = |from: &[u8], to: &mut [MaybeUninit<u8>]| {
@@ -67,13 +75,6 @@ impl<R: Read> BufferedRead<R> {
         Ok(unsafe { buff.assume_init() })
     }
 
-    pub fn read(&mut self, n: usize) -> io::Result<Box<[u8]>> {
-        let mut buff = Box::new_uninit_slice(n);
-        self.read_exact(&mut buff)?;
-        // buff has been filled if the call to self.read_exact succeeds
-        Ok(unsafe { buff.assume_init() })
-    }
-
     pub fn next_byte(&mut self) -> io::Result<u8> {
         self.fill_buff(1)?;
         Ok(self
@@ -82,43 +83,42 @@ impl<R: Read> BufferedRead<R> {
             .expect("there has to be at least 1 byte within self.scratch"))
     }
 
+    pub fn read(&mut self, n: usize) -> io::Result<Box<[u8]>> {
+        let mut buff = Box::new_uninit_slice(n);
+        self.read_exact(&mut buff)?;
+        // buff has been filled if the call to self.read_exact succeeds
+        Ok(unsafe { buff.assume_init() })
+    }
+
     pub fn has_data(&mut self) -> io::Result<bool> {
         Ok(self.scratch.is_empty() && {
-            let mut byte = 0;
-            let amt = self.reader.read(std::array::from_mut(&mut byte))?;
-            match amt {
-                0 => true,
-                1 => {
-                    self.scratch.push_back(byte);
-                    false
-                }
-                _ => unreachable!()
-            }
+            fill!(self, return Ok(false));
+            true
         })
     }
 }
 
 
 
-pub trait BoundedVarInt: VarInt {
+pub trait Int: VarInt {
     const MAX_SIZE: usize;
 }
 
-impl<VI: VarInt> BoundedVarInt for VI {
+impl<VI: VarInt> Int for VI {
     const MAX_SIZE: usize = (size_of::<Self>() * 8 + 7) / 7;
 }
 
 const CONTINUE_BIT: u8 = 0b1000_0000;
 
-struct VarIntProcessor<T: BoundedVarInt> {
+struct Leb128Parser<T: Int> {
     buf: [u8; 10],
     i: usize,
     _marker: PhantomData<T>,
 }
 
-impl<T: BoundedVarInt> VarIntProcessor<T> {
+impl<T: Int> Leb128Parser<T> {
     pub fn new() -> Self {
-        VarIntProcessor {
+        Leb128Parser {
             buf: [0; 10],
             i: 0,
             _marker: PhantomData,
@@ -144,8 +144,8 @@ impl<T: BoundedVarInt> VarIntProcessor<T> {
 }
 
 impl<R: Read> BufferedRead<R> {
-    pub fn read_varint<VI: BoundedVarInt>(&mut self) -> io::Result<VI> {
-        let mut p = VarIntProcessor::<VI>::new();
+    pub fn read_leb128<VI: Int>(&mut self) -> io::Result<VI> {
+        let mut p = Leb128Parser::<VI>::new();
         while !p.finished() {
             p.push(self.next_byte()?)?;
         }
