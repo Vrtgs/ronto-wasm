@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 
 mod backend;
-mod bufferedread;
+mod read_tape;
 mod frontend;
 
 #[derive(Parser)]
