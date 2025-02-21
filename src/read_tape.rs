@@ -35,7 +35,10 @@ impl<R: Read> ReadTape<R> {
 
     fn fill_buff(&mut self, n: usize) -> io::Result<()> {
         while self.scratch.len() < n {
-            fill!(self, return Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
+            fill!(
+                self,
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof))
+            );
         }
 
         Ok(())
@@ -57,7 +60,7 @@ impl<R: Read> ReadTape<R> {
                 let (back, _) = back.split_at(buf_back.len());
                 copy_into(front, buf_front);
                 copy_into(back, buf_back);
-            },
+            }
         }
 
         self.scratch.drain(..buf.len());
@@ -83,6 +86,15 @@ impl<R: Read> ReadTape<R> {
             .expect("there has to be at least 1 byte within self.scratch"))
     }
 
+    pub fn peek_byte(&mut self) -> io::Result<u8> {
+        self.fill_buff(1)?;
+        Ok(self
+            .scratch
+            .front()
+            .copied()
+            .expect("there has to be at least 1 byte within self.scratch"))
+    }
+
     pub fn read(&mut self, n: usize) -> io::Result<Box<[u8]>> {
         let mut buff = Box::new_uninit_slice(n);
         self.read_exact(&mut buff)?;
@@ -97,8 +109,6 @@ impl<R: Read> ReadTape<R> {
         })
     }
 }
-
-
 
 pub trait Int: VarInt {
     const MAX_SIZE: usize;
