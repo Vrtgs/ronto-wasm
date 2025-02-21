@@ -1,8 +1,8 @@
+use crate::frontend::vector::{Index, WasmVec};
 use crate::read_tape::ReadTape;
 use std::error::Error;
 use std::io::{self, Read, Result};
 use std::marker::PhantomData;
-use crate::frontend::vector::WasmVec;
 
 mod vector;
 
@@ -298,15 +298,15 @@ impl Decode for Definition {
     }
 }
 
-type TypeIdx = u32;
-type FunctionIdx = u32;
-type TableIdx = u32;
-type MemoryIdx = u32;
-type GlobalIdx = u32;
-type ElementIdx = u32;
-type DataIdx = u32;
-type LocalIdx = u32;
-type LabelIdx = u32;
+type TypeIdx = Index;
+type FunctionIdx = Index;
+type TableIdx = Index;
+type MemoryIdx = Index;
+type GlobalIdx = Index;
+type ElementIdx = Index;
+type DataIdx = Index;
+type LocalIdx = Index;
+type LabelIdx = Index;
 
 type MemoryType = Limit;
 type GlobalType = TodoDecode<103>;
@@ -363,22 +363,75 @@ decodable! {
     enum Instruction: u8 {
         Unreachable = 0x00,
         Nop = 0x01,
-        Block(Expression) = 0x02,
-        Loop(Expression) = 0x03,
-        IfElse(IfElseBlock) = 0x04,
+        Block(BlockType, Expression) = 0x02,
+        Loop(BlockType, Expression) = 0x03,
+        IfElse(BlockType, IfElseBlock) = 0x04,
         Return = 0x0f,
+        Call(FunctionIdx) = 0x10,
+        CallIndirect(TypeIdx, TableIdx) = 0x11,
         Drop = 0x1a,
         LocalGet(LocalIdx) = 0x20,
         LocalSet(LocalIdx) = 0x21,
         LocalTee(LocalIdx) = 0x22,
         GlobalGet(GlobalIdx) = 0x23,
         GlobalSet(GlobalIdx) = 0x24,
+        LoadI32(MemoryArgument) = 0x28,
+        LoadI64(MemoryArgument) = 0x29,
+        LoadF32(MemoryArgument) = 0x2a,
+        LoadF64(MemoryArgument) = 0x2b,
+        StoreI32(MemoryArgument) = 0x36,
+        StoreI64(MemoryArgument) = 0x37,
+        StoreF32(MemoryArgument) = 0x38,
+        StoreF64(MemoryArgument) = 0x39,
+        Store8I32(MemoryArgument) = 0x3a,
+        Store16I32(MemoryArgument) = 0x3b,
+        Store8I64(MemoryArgument) = 0x3c,
+        Store16I64(MemoryArgument) = 0x3d,
+        Store32I64(MemoryArgument) = 0x3e,
         ConstI32(i32) = 0x41,
         ConstI64(i64) = 0x42,
         ConstF32(f32) = 0x43,
         ConstF64(f64) = 0x44,
+        ClzI32 = 0x67,
+        CtzI32 = 0x68,
+        PopcntI32 = 0x69,
         AddI32 = 0x6a,
         SubI32 = 0x6b,
+        MulI32 = 0x6c,
+        DivsI32 = 0x6d,
+        DivuI32 = 0x6e,
+        RemsI32 = 0x6f,
+        RemuI32 = 0x70,
+        AndI32 = 0x71,
+        OrI32 = 0x72,
+        XorI32 = 0x73,
+        ShlI32 = 0x74,
+        ShrsI32 = 0x75,
+        ShruI32 = 0x76,
+        RotlI32 = 0x77,
+        RotrI32 = 0x78,
+        MemorySize(TagByte<0x00>) = 0x3f,
+        MemoryGrow(TagByte<0x00>) = 0x40,
+    }
+}
+
+#[derive(Debug)]
+enum BlockType {
+    Empty,
+    Type(ValueType),
+    TypeIdx(TypeIdx),
+}
+
+impl Decode for BlockType {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let byte = file.peek_byte()?;
+        if byte == 0x40 {
+            Ok(BlockType::Empty)
+        } else if byte > 0x40 && byte < 0x80 {
+            Ok(BlockType::Type(ValueType::decode(file)?))
+        } else {
+            Ok(BlockType::TypeIdx(Index::decode(file)?))
+        }
     }
 }
 
