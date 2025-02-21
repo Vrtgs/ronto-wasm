@@ -1,10 +1,10 @@
+use std::error::Error;
 use crate::frontend::Decode;
 use crate::read_tape::ReadTape;
 use std::fmt;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::io::Read;
 use std::mem::ManuallyDrop;
-use std::num::TryFromIntError;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
@@ -21,29 +21,38 @@ impl Decode for Index {
 #[cold]
 #[inline(never)]
 #[track_caller]
-fn out_of_range_panic() -> ! {
+const fn out_of_range_panic() -> ! {
     panic!("index has to fit in a u32")
 }
 
-fn unwrap_index_error<T>(res: Result<T, TryFromIntError>) -> T {
-    match res {
-        Ok(x) => x,
-        Err(_) => out_of_range_panic()
-    }
+macro_rules! unwrap_index_error {
+    ($res: expr) => {
+        match $res {
+            Some(x) => x,
+            None => out_of_range_panic()
+        }
+    };
 }
 
+const _: () = assert!(
+    usize::BITS >= u32::BITS,
+    "architecture unsupported, pointer width should be at least 32"
+);
+
 impl Index {
-    pub fn try_from_usize(index: usize) -> Result<Index, TryFromIntError> {
-        u32::try_from(index).map(Self)
+    pub const fn try_from_usize(index: usize) -> Option<Index> {
+        if index >= u32::MAX as usize { 
+            return None
+        }
+        
+        Some(Index(index as u32))
     }
 
-    pub fn as_usize(self) -> usize {
-        const {
-            assert!(
-                usize::BITS >= u32::BITS,
-                "architecture unsupported, pointer width should be at least 32"
-            )
-        }
+    pub const fn from_usize(index: usize) -> Index {
+        unwrap_index_error!(Self::try_from_usize(index))
+    }
+
+    pub const fn as_usize(self) -> usize {
         self.0 as usize
     }
 }
@@ -59,7 +68,7 @@ unsafe impl<T: Sync> Sync for WasmVec<T> {}
 
 impl<T> WasmVec<T> {
     pub fn from_box(bx: Box<[T]>) -> Self {
-        unwrap_index_error(Self::try_from(bx))
+        unwrap_index_error!(Self::try_from(bx).ok())
     }
     
     /// # Safety
@@ -91,10 +100,21 @@ impl<T: Clone> Clone for WasmVec<T> {
     }
 }
 
+#[derive(Debug)]
+pub struct VectorTooLong(());
+
+impl Display for VectorTooLong {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("\"vector type too long\"")
+    }
+}
+
+impl Error for VectorTooLong {}
+
 impl<T> TryFrom<Box<[T]>> for WasmVec<T> {
-    type Error = TryFromIntError;
+    type Error = VectorTooLong;
     fn try_from(value: Box<[T]>) -> Result<Self, Self::Error> {
-        let len = Index::try_from_usize(value.len())?;
+        let len = Index::try_from_usize(value.len()).ok_or(VectorTooLong(()))?;
         let ptr = Box::into_raw(value) as *mut T;
         Ok(WasmVec {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
@@ -138,4 +158,4 @@ macro_rules! deref_trait {
     };
 }
 
-deref_trait!(Debug; fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result);
+deref_trait!(Debug; fn fmt(&self, f: &mut Formatter) -> fmt::Result);

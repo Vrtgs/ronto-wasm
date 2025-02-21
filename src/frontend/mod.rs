@@ -11,8 +11,7 @@ fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
 }
 
 fn vector_from_vec<T>(vec: Vec<T>) -> Result<WasmVec<T>> {
-    WasmVec::try_from(vec.into_boxed_slice())
-        .map_err(|_|invalid_data("vector type too long"))
+    WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
 }
 
 macro_rules! expect {
