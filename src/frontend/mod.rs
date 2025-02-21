@@ -1,10 +1,8 @@
-use crate::frontend::vector::{Index, WasmVec};
 use crate::read_tape::ReadTape;
+use nom::Parser;
 use std::error::Error;
 use std::io::{self, Read, Result};
 use std::marker::PhantomData;
-
-mod vector;
 
 fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
@@ -28,7 +26,7 @@ where
 #[derive(Debug)]
 struct TodoDecode<const N: usize>;
 impl<const N: usize> Decode for TodoDecode<N> {
-    fn decode(_: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         todo!("todo decode#{}", N)
     }
 }
@@ -40,12 +38,6 @@ impl Decode for bool {
             1 => Ok(true),
             _ => Err(invalid_data("boolean should only be 0 or 1")),
         }
-    }
-}
-
-impl<T: Decode, U: Decode> Decode for (T, U) {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-       Ok((T::decode(file)?, U::decode(file)?))
     }
 }
 
@@ -80,6 +72,12 @@ impl<T: Decode> Decode for PhantomData<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let _ = T::decode(file)?;
         Ok(PhantomData)
+    }
+}
+
+impl Decode for usize {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        Ok(u32::decode(file)?.try_into().expect("usize too small"))
     }
 }
 
@@ -138,16 +136,14 @@ struct CustomSection;
 
 impl Decode for CustomSection {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let length = Index::decode(file)?;
-        let _ = file.read(length.as_usize())?;
+        let length = usize::decode(file)?;
+        let _ = file.read(length)?;
         Ok(CustomSection)
     }
 }
 
-type FunctionIndex = Index;
-
 decodable! {
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     enum ValueType: u8 {
         I32 = 0x7F,
         I64 = 0x7E,
@@ -168,15 +164,22 @@ decodable! {
         Memory(Length, MemorySection) = 0x05,
         Global(Length, GlobalSection) = 0x06,
         Export(Length, ExportSection) = 0x07,
-        Start(Length, FunctionIndex) = 0x08,
-        Element(Length, TodoDecode<7>) = 0x09,
-        Code(Length, TodoDecode<8>) = 0x0a,
+        Start(Length, TodoDecode<6>) = 0x08,
+        Element(Length, ElementSection) = 0x09,
+        Code(Length, CodeSection) = 0x0a,
         Data(Length, TodoDecode<9>) = 0x0b,
         DataCount(Length, TodoDecode<10>) = 0x0c,
     }
 }
 
-type Length = PhantomData<Index>;
+type Length = PhantomData<usize>;
+
+impl<T: Decode> Decode for Box<[T]> {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let len = u32::decode(file)?;
+        (0..len).map(|_| T::decode(file)).collect()
+    }
+}
 
 #[derive(Debug)]
 struct TagByte<const TAG: u8>;
@@ -191,20 +194,22 @@ decodable! {
     #[derive(Debug)]
     struct FuncType {
         _signature: TagByte<0x60>,
-        parameters: WasmVec<ValueType>,
-        result: WasmVec<ValueType>,
+        parameters: Box<[ValueType]>,
+        result: Box<[ValueType]>,
     }
 
     #[derive(Debug)]
     struct TypeSection {
-        functions: WasmVec<FuncType>,
+        functions: Box<[FuncType]>,
     }
 }
 
 impl Decode for String {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let len = Index::decode(file)?;
-        String::from_utf8(file.read(len.as_usize())?.into()).map_err(invalid_data)
+        let len = usize::decode(file)?;
+        Ok(dbg!(
+            String::from_utf8_lossy(&file.read(dbg!(len))?).into_owned()
+        ))
     }
 }
 
@@ -218,15 +223,15 @@ decodable! {
 
     #[derive(Debug)]
     enum InterfaceDescription: u8 {
-        Func(u32) = 0x00,
-        Table(u32) = 0x01,
-        Memory(u32) = 0x02,
-        Global(u32) = 0x03,
+        Function(FunctionIdx) = 0x00,
+        Table(TableIdx) = 0x01,
+        Memory(MemoryIdx) = 0x02,
+        Global(GlobalIdx) = 0x03,
     }
 
     #[derive(Debug)]
     struct ImportSection {
-        imports: WasmVec<Import>,
+        imports: Box<[Import]>,
     }
 
     #[derive(Debug)]
@@ -237,26 +242,91 @@ decodable! {
 
     #[derive(Debug)]
     struct ExportSection {
-        exports: WasmVec<Export>,
+        exports: Box<[Export]>,
+    }
+
+    #[derive(Debug)]
+    enum ElementKind: u8 {
+        FunctionReference = 0x00,
+    }
+
+    #[derive(Debug)]
+    enum Element: u32 {
+        Case00(Expression, Box<[FunctionIdx]>) = 0x00,
+        Case01(ElementKind, Box<[FunctionIdx]>) = 0x01,
+        Case02(TableIdx, Expression, ElementKind, Box<[FunctionIdx]>) = 0x02,
+        Case03(ElementKind, Box<[FunctionIdx]>) = 0x03,
+        Case04(Expression, Box<[Expression]>) = 0x04,
+        Case05(ValueType, Box<[Expression]>) = 0x05,
+        Case06(TableIdx, Expression, ValueType, Box<[Expression]>) = 0x06,
+        Case07(ValueType, Box<[Expression]>) = 0x07,
+    }
+
+    #[derive(Debug)]
+    struct ElementSection {
+        elements: Box<[Element]>,
+    }
+
+    #[derive(Debug)]
+    struct CodeSection {
+        definitions: Box<[Definition]>,
+    }
+}
+
+#[derive(Debug)]
+struct Definition {
+    locals: Box<[ValueType]>,
+    body: Expression,
+}
+
+impl<T: Decode, U: Decode> Decode for (T, U) {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        Ok((T::decode(file)?, U::decode(file)?))
+    }
+}
+
+impl Decode for Definition {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let _ = u32::decode(file)?;
+        let count = usize::decode(file)?;
+        let mut locals = vec![];
+        for _ in 0..count {
+            let (run_length, value_type) = <(usize, ValueType)>::decode(file)?;
+            locals.extend_from_slice(
+                &std::iter::repeat_n(value_type, run_length).collect::<Box<_>>(),
+            );
+        }
+        let locals = locals.into_boxed_slice();
+        let body = Expression::decode(file)?;
+        Ok(Definition { locals, body })
     }
 }
 
 type TypeIdx = u32;
+type FunctionIdx = u32;
+type TableIdx = u32;
+type MemoryIdx = u32;
+type GlobalIdx = u32;
+type ElementIdx = u32;
+type DataIdx = u32;
+type LocalIdx = u32;
+type LabelIdx = u32;
+
 type MemoryType = Limit;
 type GlobalType = TodoDecode<103>;
 
 decodable! {
     #[derive(Debug)]
     struct FunctionSection {
-        signatures: WasmVec<TypeIdx>,
+        signatures: Box<[TypeIdx]>,
     }
 }
 
 decodable! {
     #[derive(Debug)]
     enum Limit: u8 {
-        HalfBounded(Index) = 0x00,
-        Bounded(Index, Index) = 0x01,
+        HalfBounded(usize) = 0x00,
+        Bounded(usize, usize) = 0x01,
     }
 
     #[derive(Debug)]
@@ -267,12 +337,12 @@ decodable! {
 
     #[derive(Debug)]
     struct TableSection {
-        tables: WasmVec<TableType>,
+        tables: Box<[TableType]>,
     }
 
     #[derive(Debug)]
     struct MemorySection {
-        memories: WasmVec<Limit>,
+        memories: Box<[Limit]>,
     }
 
     #[derive(Debug)]
@@ -284,7 +354,13 @@ decodable! {
 
     #[derive(Debug)]
     struct GlobalSection {
-        globals: WasmVec<Global>,
+        globals: Box<[Global]>,
+    }
+
+    #[derive(Debug)]
+    struct MemoryArgument {
+        align: u32,
+        offset: u32,
     }
 
     #[derive(Debug)]
@@ -294,10 +370,20 @@ decodable! {
         Block(Expression) = 0x02,
         Loop(Expression) = 0x03,
         IfElse(IfElseBlock) = 0x04,
+        Return = 0x0f,
+        Drop = 0x1a,
+        LocalGet(LocalIdx) = 0x20,
+        LocalSet(LocalIdx) = 0x21,
+        LocalTee(LocalIdx) = 0x22,
+        GlobalGet(GlobalIdx) = 0x23,
+        GlobalSet(GlobalIdx) = 0x24,
         ConstI32(i32) = 0x41,
         ConstI64(i64) = 0x42,
         ConstF32(f32) = 0x43,
         ConstF64(f64) = 0x44,
+        AddI32 = 0x6a,
+        SubI32 = 0x6b,
+        StoreI32(Mem)
     }
 }
 
@@ -316,15 +402,13 @@ impl Decode for IfElseBlock {
         }
 
         let ifso = Expression {
-            instructions: ifso.into_boxed_slice().into(),
+            instructions: ifso.into_boxed_slice(),
         };
-        match file.read_byte()? {
-            INSTRUCTION_ELSE => {
-                let ifnot = Expression::decode(file)?;
-                Ok(IfElseBlock::IfElse(ifso, ifnot))
-            }
-            INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
-            _ => unreachable!(),
+        if file.read_byte()? == INSTRUCTION_ELSE {
+            let ifnot = Expression::decode(file)?;
+            Ok(IfElseBlock::IfElse(ifso, ifnot))
+        } else {
+            Ok(IfElseBlock::If(ifso))
         }
     }
 }
@@ -334,7 +418,7 @@ const INSTRUCTION_END: u8 = 0x0B;
 
 #[derive(Debug)]
 struct Expression {
-    instructions: WasmVec<Instruction>,
+    instructions: Box<[Instruction]>,
 }
 
 impl Decode for Expression {
@@ -347,7 +431,7 @@ impl Decode for Expression {
         let _ = file.read_byte();
 
         Ok(Expression {
-            instructions: instructions.into_boxed_slice().into(),
+            instructions: instructions.into_boxed_slice(),
         })
     }
 }
