@@ -22,6 +22,7 @@ macro_rules! expect {
         }
     }
 }
+
 trait Decode
 where
     Self: Sized,
@@ -81,12 +82,6 @@ impl<T: Decode> Decode for PhantomData<T> {
     }
 }
 
-impl Decode for usize {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        Ok(u32::decode(file)?.try_into().expect("usize too small"))
-    }
-}
-
 macro_rules! decodable {
     {} => {};
     {$(#[$($meta:tt)*])* enum $name:ident: $type: ty { $($variant:ident $(($($inner:ty),*))? = $value:expr),* $(,)? } $($next:tt)*} => {
@@ -138,13 +133,13 @@ macro_rules! decodable {
 }
 
 #[derive(Debug)]
-struct CustomSection;
+struct CustomSection(WasmVec<u8>);
 
 impl Decode for CustomSection {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let length = usize::decode(file)?;
-        let _ = file.read(length)?;
-        Ok(CustomSection)
+        let length = Index::decode(file)?;
+        let bx = file.read(length.as_usize())?;
+        Ok(CustomSection(WasmVec::from_trusted_box(bx)))
     }
 }
 
@@ -178,7 +173,7 @@ decodable! {
     }
 }
 
-type Length = PhantomData<usize>;
+type Length = PhantomData<Index>;
 
 #[derive(Debug)]
 struct TagByte<const TAG: u8>;
@@ -205,9 +200,9 @@ decodable! {
 
 impl Decode for String {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let len = usize::decode(file)?;
+        let len = Index::decode(file)?;
         Ok(dbg!(
-            String::from_utf8_lossy(&file.read(dbg!(len))?).into_owned()
+            String::from_utf8_lossy(&file.read(len.as_usize())?).into_owned()
         ))
     }
 }
@@ -287,11 +282,11 @@ impl<T: Decode, U: Decode> Decode for (T, U) {
 impl Decode for Definition {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let _ = u32::decode(file)?;
-        let count = usize::decode(file)?;
+        let count = Index::decode(file)?;
         let mut locals = vec![];
-        for _ in 0..count {
-            let (run_length, value_type) = <(usize, ValueType)>::decode(file)?;
-            locals.extend(std::iter::repeat_n(value_type, run_length));
+        for _ in 0..count.0 {
+            let (run_length, value_type) = <(Index, ValueType)>::decode(file)?;
+            locals.extend(std::iter::repeat_n(value_type, run_length.as_usize()));
         }
         let locals = vector_from_vec(locals)?;
         let body = Expression::decode(file)?;
@@ -322,8 +317,8 @@ decodable! {
 decodable! {
     #[derive(Debug)]
     enum Limit: u8 {
-        HalfBounded(usize) = 0x00,
-        Bounded(usize, usize) = 0x01,
+        HalfBounded(Index) = 0x00,
+        Bounded(Index, Index) = 0x01,
     }
 
     #[derive(Debug)]

@@ -9,7 +9,7 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct Index(u32);
+pub struct Index(pub u32);
 
 impl Decode for Index {
     fn decode(file: &mut ReadTape<impl Read>) -> std::io::Result<Self> {
@@ -41,10 +41,10 @@ const _: () = assert!(
 
 impl Index {
     pub const fn try_from_usize(index: usize) -> Option<Index> {
-        if index >= u32::MAX as usize { 
+        if index >= u32::MAX as usize {
             return None
         }
-        
+
         Some(Index(index as u32))
     }
 
@@ -70,7 +70,7 @@ impl<T> WasmVec<T> {
     pub fn from_trusted_box(bx: Box<[T]>) -> Self {
         unwrap_index_error!(Self::try_from(bx).ok())
     }
-    
+
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
