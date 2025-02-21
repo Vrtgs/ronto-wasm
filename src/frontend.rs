@@ -28,7 +28,7 @@ where
 #[derive(Debug)]
 struct TodoDecode<const N: usize>;
 impl<const N: usize> Decode for TodoDecode<N> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(_: &mut ReadTape<impl Read>) -> Result<Self> {
         todo!("todo decode#{}", N)
     }
 }
@@ -197,9 +197,7 @@ decodable! {
 impl Decode for String {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let len = Index::decode(file)?;
-        Ok(dbg!(
-            String::from_utf8_lossy(&file.read(len.as_usize())?).into_owned()
-        ))
+        String::from_utf8(file.read(len.as_usize())?.into()).map_err(invalid_data)
     }
 }
 
