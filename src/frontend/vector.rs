@@ -67,7 +67,7 @@ unsafe impl<T: Send> Send for WasmVec<T> {}
 unsafe impl<T: Sync> Sync for WasmVec<T> {}
 
 impl<T> WasmVec<T> {
-    pub fn from_box(bx: Box<[T]>) -> Self {
+    pub fn from_trusted_box(bx: Box<[T]>) -> Self {
         unwrap_index_error!(Self::try_from(bx).ok())
     }
     
@@ -96,7 +96,7 @@ impl<T> DerefMut for WasmVec<T> {
 
 impl<T: Clone> Clone for WasmVec<T> {
     fn clone(&self) -> Self {
-        Self::from_box(Box::<[T]>::from(&**self))
+        Self::from_trusted_box(Box::<[T]>::from(&**self))
     }
 }
 
@@ -144,7 +144,7 @@ impl<T: Decode> Decode for WasmVec<T> {
         (0..len)
             .map(|_| T::decode(file))
             .collect::<Result<Box<[_]>, _>>()
-            .map(Self::from_box)
+            .map(Self::from_trusted_box)
     }
 }
 
