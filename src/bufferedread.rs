@@ -12,6 +12,19 @@ pub struct BufferedRead<R: Read> {
     scratch: VecDeque<u8>,
 }
 
+macro_rules! fill {
+    ($self: ident, $($eof_handler: tt)*) => {'fill: {
+        let mut buff = [0; BUF_SIZE];
+        let amt = $self.reader.read(&mut buff)?;
+        if amt == 0 {
+            $($eof_handler)*;
+            
+            #[allow(unreachable_code)] { break 'fill }
+        }
+        $self.scratch.extend(&buff[..amt])
+    }};
+}
+
 impl<R: Read> BufferedRead<R> {
     pub fn new(reader: R) -> Self {
         Self {
@@ -22,12 +35,7 @@ impl<R: Read> BufferedRead<R> {
 
     pub fn fill_buff(&mut self, n: usize) -> io::Result<()> {
         while self.scratch.len() < n {
-            let mut buff = [0; BUF_SIZE];
-            let amt = self.reader.read(&mut buff)?;
-            if amt == 0 {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
-            self.scratch.extend(&buff[..amt])
+            fill!(self, return Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
         }
 
         Ok(())
@@ -84,16 +92,8 @@ impl<R: Read> BufferedRead<R> {
 
     pub fn has_data(&mut self) -> io::Result<bool> {
         Ok(self.scratch.is_empty() && {
-            let mut byte = 0;
-            let amt = self.reader.read(std::array::from_mut(&mut byte))?;
-            match amt {
-                0 => true,
-                1 => {
-                    self.scratch.push_back(byte);
-                    false
-                }
-                _ => unreachable!()
-            }
+            fill!(self, return Ok(false));
+            true
         })
     }
 }
