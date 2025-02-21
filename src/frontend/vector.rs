@@ -21,7 +21,7 @@ impl Index {
     pub fn from_usize(index: usize) -> Index {
         u32::try_from(index).map(Self).expect("index has to fit in a u32")
     }
-    
+
     pub fn as_usize(self) -> usize {
         const { assert!(usize::BITS >= u32::BITS, "architecture unsupported, pointer width should be at least 32") }
         self.0 as usize

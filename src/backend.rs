@@ -1,1 +1,1 @@
-pub fn execute(_wasm: crate::frontend::Binary) {}
+pub fn execute(_wasm: crate::Binary) {}

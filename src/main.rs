@@ -7,6 +7,8 @@ mod backend;
 mod read_tape;
 mod frontend;
 
+use frontend::Binary;
+
 #[derive(Parser)]
 struct Cli {
     file: PathBuf,
