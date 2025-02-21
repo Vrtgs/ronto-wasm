@@ -18,7 +18,7 @@ macro_rules! fill {
         let amt = $self.reader.read(&mut buff)?;
         if amt == 0 {
             $($eof_handler)*;
-            
+
             #[allow(unreachable_code)] { break 'fill }
         }
         $self.scratch.extend(&buff[..amt])
@@ -41,7 +41,7 @@ impl<R: Read> BufferedRead<R> {
         Ok(())
     }
 
-    pub fn read_exact(&mut self, buf: &mut [MaybeUninit<u8>]) -> io::Result<()> {
+    fn read_exact(&mut self, buf: &mut [MaybeUninit<u8>]) -> io::Result<()> {
         self.fill_buff(buf.len())?;
 
         let copy_into = |from: &[u8], to: &mut [MaybeUninit<u8>]| {
@@ -75,19 +75,19 @@ impl<R: Read> BufferedRead<R> {
         Ok(unsafe { buff.assume_init() })
     }
 
-    pub fn read(&mut self, n: usize) -> io::Result<Box<[u8]>> {
-        let mut buff = Box::new_uninit_slice(n);
-        self.read_exact(&mut buff)?;
-        // buff has been filled if the call to self.read_exact succeeds
-        Ok(unsafe { buff.assume_init() })
-    }
-
     pub fn next_byte(&mut self) -> io::Result<u8> {
         self.fill_buff(1)?;
         Ok(self
             .scratch
             .pop_front()
             .expect("there has to be at least 1 byte within self.scratch"))
+    }
+
+    pub fn read(&mut self, n: usize) -> io::Result<Box<[u8]>> {
+        let mut buff = Box::new_uninit_slice(n);
+        self.read_exact(&mut buff)?;
+        // buff has been filled if the call to self.read_exact succeeds
+        Ok(unsafe { buff.assume_init() })
     }
 
     pub fn has_data(&mut self) -> io::Result<bool> {
