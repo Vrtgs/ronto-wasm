@@ -292,9 +292,7 @@ impl Decode for Definition {
         let mut locals = vec![];
         for _ in 0..count {
             let (run_length, value_type) = <(usize, ValueType)>::decode(file)?;
-            locals.extend_from_slice(
-                &std::iter::repeat_n(value_type, run_length).collect::<Box<_>>(),
-            );
+            locals.extend(std::iter::repeat_n(value_type, run_length));
         }
         let locals = vector_from_vec(locals)?;
         let body = Expression::decode(file)?;
