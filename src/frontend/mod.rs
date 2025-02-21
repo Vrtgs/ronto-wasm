@@ -43,6 +43,12 @@ impl Decode for bool {
     }
 }
 
+impl<T: Decode, U: Decode> Decode for (T, U) {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+       Ok((T::decode(file)?, U::decode(file)?))
+    }
+}
+
 macro_rules! impl_decode_for_int {
     ($($ints:ident)*) => {
         $(
