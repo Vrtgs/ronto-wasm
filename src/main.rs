@@ -4,8 +4,8 @@ use std::io::BufReader;
 use std::path::PathBuf;
 
 mod backend;
-mod read_tape;
 mod frontend;
+mod read_tape;
 
 use frontend::Binary;
 

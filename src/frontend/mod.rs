@@ -1,8 +1,8 @@
+use crate::frontend::vector::{Index, WasmVec};
 use crate::read_tape::ReadTape;
 use std::error::Error;
 use std::io::{self, Read, Result};
 use std::marker::PhantomData;
-use crate::frontend::vector::{Index, WasmVec};
 
 mod vector;
 
@@ -170,7 +170,6 @@ decodable! {
 
 type Length = PhantomData<Index>;
 
-
 #[derive(Debug)]
 struct TagByte<const TAG: u8>;
 impl<const TAG: u8> Decode for TagByte<TAG> {
@@ -317,7 +316,7 @@ impl Decode for IfElseBlock {
                 Ok(IfElseBlock::IfElse(ifso, ifnot))
             }
             INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }
