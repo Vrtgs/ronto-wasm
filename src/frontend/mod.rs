@@ -144,6 +144,8 @@ impl Decode for CustomSection {
     }
 }
 
+type FunctionIndex = Index;
+
 decodable! {
     #[derive(Debug)]
     enum ValueType: u8 {
@@ -166,7 +168,7 @@ decodable! {
         Memory(Length, MemorySection) = 0x05,
         Global(Length, GlobalSection) = 0x06,
         Export(Length, ExportSection) = 0x07,
-        Start(Length, TodoDecode<6>) = 0x08,
+        Start(Length, FunctionIndex) = 0x08,
         Element(Length, TodoDecode<7>) = 0x09,
         Code(Length, TodoDecode<8>) = 0x0a,
         Data(Length, TodoDecode<9>) = 0x0b,
