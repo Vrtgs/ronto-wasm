@@ -33,7 +33,7 @@ impl<R: Read> ReadTape<R> {
         }
     }
 
-    pub fn fill_buff(&mut self, n: usize) -> io::Result<()> {
+    fn fill_buff(&mut self, n: usize) -> io::Result<()> {
         while self.scratch.len() < n {
             fill!(self, return Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
         }
@@ -64,7 +64,7 @@ impl<R: Read> ReadTape<R> {
         Ok(())
     }
 
-    pub fn next_chunk<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+    pub fn read_chunk<const N: usize>(&mut self) -> io::Result<[u8; N]> {
         let mut buff = const { MaybeUninit::<[u8; N]>::uninit() };
         // Safety:
         // conversion between MaybeUninit<[u8; N]> -> [MaybeUninit<u8>; N]
@@ -75,7 +75,7 @@ impl<R: Read> ReadTape<R> {
         Ok(unsafe { buff.assume_init() })
     }
 
-    pub fn next_byte(&mut self) -> io::Result<u8> {
+    pub fn read_byte(&mut self) -> io::Result<u8> {
         self.fill_buff(1)?;
         Ok(self
             .scratch
@@ -147,7 +147,7 @@ impl<R: Read> ReadTape<R> {
     pub fn read_leb128<VI: Int>(&mut self) -> io::Result<VI> {
         let mut p = Leb128Parser::<VI>::new();
         while !p.finished() {
-            p.push(self.next_byte()?)?;
+            p.push(self.read_byte()?)?;
         }
         p.decode()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "leb128 integer too long"))
