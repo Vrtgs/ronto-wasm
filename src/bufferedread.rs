@@ -7,7 +7,7 @@ use std::mem::MaybeUninit;
 
 const BUF_SIZE: usize = 8096;
 
-pub struct BufferedRead<R: Read> {
+pub struct ReadTape<R: Read> {
     reader: R,
     scratch: VecDeque<u8>,
 }
@@ -25,7 +25,7 @@ macro_rules! fill {
     }};
 }
 
-impl<R: Read> BufferedRead<R> {
+impl<R: Read> ReadTape<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader,
@@ -143,13 +143,13 @@ impl<T: Int> Leb128Parser<T> {
     }
 }
 
-impl<R: Read> BufferedRead<R> {
+impl<R: Read> ReadTape<R> {
     pub fn read_leb128<VI: Int>(&mut self) -> io::Result<VI> {
         let mut p = Leb128Parser::<VI>::new();
         while !p.finished() {
             p.push(self.next_byte()?)?;
         }
         p.decode()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid varint read"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "leb128 integer too long"))
     }
 }
