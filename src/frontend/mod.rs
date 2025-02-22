@@ -168,7 +168,7 @@ impl Decode for CustomSection {
 }
 
 decodable! {
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Eq, PartialEq)]
     enum ValueType: u8 {
         I32 = 0x7F,
         I64 = 0x7E,
@@ -430,7 +430,7 @@ mod instruction;
 
 use instruction::Instruction;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 enum BlockType {
     Empty,
     Type(ValueType),
@@ -483,7 +483,7 @@ impl Decode for IfElseBlock {
 const INSTRUCTION_ELSE: u8 = 0x05;
 const INSTRUCTION_END: u8 = 0x0B;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct Expression {
     instructions: WasmVec<Instruction>,
 }

@@ -154,13 +154,17 @@ impl<T: Decode> Decode for WasmVec<T> {
 }
 
 macro_rules! deref_trait {
-    ($trait: ident; fn $name: ident(&self $(, $arg_name: ident : $arg_ty:ty)*) $(-> $ret: ty)?) => {
+    ($trait: ident $(; fn $name: ident(&self $(, $arg_name: ident : $arg_ty:ty)*) $(-> $ret: ty)?)*) => {
         impl<T: $trait> $trait for WasmVec<T> {
+            $(
             fn $name(&self $(, $arg_name : $arg_ty)*) $(-> $ret)? {
-                $trait::$name(&**self $(, $arg_name)*)
+                <[T] as $trait>::$name(&**self $(, $arg_name)*)
             }
+            )*
         }
     };
 }
 
 deref_trait!(Debug; fn fmt(&self, f: &mut Formatter) -> fmt::Result);
+deref_trait!(PartialEq; fn eq(&self, other: &Self) -> bool; fn ne(&self, other: &Self) -> bool);
+deref_trait!(Eq);
