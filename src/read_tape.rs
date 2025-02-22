@@ -101,7 +101,7 @@ impl<R: Read> ReadTape<R> {
     }
 
     pub fn has_data(&mut self) -> io::Result<bool> {
-        Ok(!self.scratch.is_empty() && {
+        Ok(!self.scratch.is_empty() || {
             fill!(self, return Ok(false));
             true
         })
