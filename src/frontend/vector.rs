@@ -40,6 +40,9 @@ const _: () = assert!(
 );
 
 impl Index {
+    pub const ZERO: Self = Self::from_usize(0);
+    
+    
     pub const fn try_from_usize(index: usize) -> Option<Index> {
         if index >= u32::MAX as usize {
             return None
@@ -79,8 +82,8 @@ impl<T> WasmVec<T> {
                 .collect()
         )
     }
-    
-    
+
+
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
