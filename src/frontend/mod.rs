@@ -72,10 +72,14 @@ macro_rules! impl_decode_naive {
 }
 
 impl_decode_for_int! {
-    i8 i16 i32 i64 i128
-    u8 u16 u32 u64 u128
+    i8 i16 i32 i64
+    u8 u16 u32 u64
 }
-impl_decode_naive!(f32 f64);
+impl_decode_naive!(
+    f32 f64
+    // even though it's called leb**128**, the spec decided that v128 should be encoded just as na immediate
+    i128 u128
+);
 
 impl<T: Decode> Decode for PhantomData<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -172,14 +176,14 @@ macro_rules! decodable {
             const VARIANTS: &[$type] = &[$($value),*];
             #[doc(hidden)]
             #[inline(always)]
-            fn enum_try_decode(variant: $type, file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
+            fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
                 match variant {
                     $(
                     $value => {
                         Some(Ok($name::$variant$((
                             $(
                             {
-                                match <$inner>::decode(file) {
+                                match <$inner>::decode(_file) {
                                     Ok(x) => x,
                                     Err(err) => return Some(Err(err))
                                 }
@@ -236,6 +240,7 @@ macro_rules! decodable {
     };
 }
 
+#[expect(dead_code)]
 pub struct CustomSection(pub WasmVec<u8>);
 
 impl Debug for CustomSection {
@@ -292,7 +297,8 @@ decodable! {
 type Length = PhantomData<Index>;
 
 #[derive(Debug, Eq, PartialEq)]
-struct TagByte<const TAG: u8>;
+pub struct TagByte<const TAG: u8>;
+
 impl<const TAG: u8> Decode for TagByte<TAG> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         expect!(file.read_byte()? == TAG, "expected next byte to be {}", TAG).map(|()| TagByte)
@@ -369,6 +375,7 @@ decodable! {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 pub struct Element {
     pub kind: ElementKind,
     pub init: WasmVec<Expression>,
@@ -376,6 +383,7 @@ pub struct Element {
 }
 
 #[derive(Debug)]
+#[expect(dead_code)]
 pub enum ElementMode {
     Active {
         table: TableIndex,
@@ -467,7 +475,9 @@ index_ty! {
     Label
 }
 
+#[expect(dead_code)]
 type MemoryType = Limit;
+#[expect(dead_code)]
 type GlobalType = TodoDecode<103>;
 
 decodable! {
@@ -545,6 +555,7 @@ impl Decode for BlockType {
 }
 
 #[derive(Debug, PartialEq)]
+#[expect(dead_code)]
 enum IfElseBlock {
     If(Expression),
     IfElse(Expression, Expression),
