@@ -248,18 +248,6 @@ decodable! {
     }
 
     #[derive(Debug)]
-    enum Element: u32 {
-        Case00(Expression, WasmVec<FunctionIdx>) = 0x00,
-        Case01(ElementKind, WasmVec<FunctionIdx>) = 0x01,
-        Case02(TableIdx, Expression, ElementKind, WasmVec<FunctionIdx>) = 0x02,
-        Case03(ElementKind, WasmVec<FunctionIdx>) = 0x03,
-        Case04(Expression, WasmVec<Expression>) = 0x04,
-        Case05(ValueType, WasmVec<Expression>) = 0x05,
-        Case06(TableIdx, Expression, ValueType, WasmVec<Expression>) = 0x06,
-        Case07(ValueType, WasmVec<Expression>) = 0x07,
-    }
-
-    #[derive(Debug)]
     struct ElementSection {
         elements: WasmVec<Element>,
     }
@@ -267,6 +255,52 @@ decodable! {
     #[derive(Debug)]
     struct CodeSection {
         definitions: WasmVec<Definition>,
+    }
+}
+
+#[derive(Debug)]
+struct Element {
+    kind: ElementKind,
+    init: WasmVec<Expression>,
+    mode: ElementMode,
+}
+
+#[derive(Debug)]
+enum ElementMode {
+    Active { table: TableIdx, offset: Expression },
+    Passive,
+    Declarative,
+}
+
+impl Decode for Element {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let flags = file.read_byte()?;
+        let mode = match flags {
+            0x00 | 0x02 | 0x04 | 0x06 => {
+                let table = match flags {
+                    0x00 | 0x04 => Index::ZERO,
+                    0x02 | 0x06 => Index::decode(file)?,
+                    _ => unreachable!(),
+                };
+                let offset = Expression::decode(file)?;
+                ElementMode::Active { table, offset }
+            }
+            0x01 | 0x05 => ElementMode::Passive,
+            0x03 | 0x07 => ElementMode::Declarative,
+            _ => return Err(invalid_data("invalid element flags")),
+        };
+        let kind = match flags {
+            0x00 | 0x04 => ElementKind::FunctionReference,
+            _ => ElementKind::decode(file)?,
+        };
+        let init = match flags {
+            0x00 | 0x01 | 0x02 | 0x03 => {
+                WasmVec::<FunctionIdx>::decode(file)?.map(Expression::from)
+            }
+            _ => WasmVec::<Expression>::decode(file)?,
+        };
+        let result = Element { kind, init, mode };
+        Ok(result)
     }
 }
 
@@ -466,6 +500,14 @@ const INSTRUCTION_END: u8 = 0x0B;
 #[derive(Debug)]
 struct Expression {
     instructions: WasmVec<Instruction>,
+}
+
+impl From<FunctionIdx> for Expression {
+    fn from(idx: FunctionIdx) -> Self {
+        Self {
+            instructions: WasmVec::from_trusted_box(Box::new([Instruction::RefFunc(idx)])),
+        }
+    }
 }
 
 impl Decode for Expression {
