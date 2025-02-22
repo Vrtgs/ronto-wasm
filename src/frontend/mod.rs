@@ -23,10 +23,7 @@ macro_rules! expect {
     }
 }
 
-trait Decode
-where
-    Self: Sized,
-{
+trait Decode: Sized {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self>;
 }
 
@@ -200,8 +197,7 @@ type Length = PhantomData<Index>;
 struct TagByte<const TAG: u8>;
 impl<const TAG: u8> Decode for TagByte<TAG> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        expect!(file.read_byte()? == TAG, "expected next byte to be {}", TAG)?;
-        Ok(Self)
+        expect!(file.read_byte()? == TAG, "expected next byte to be {}", TAG).map(|()| TagByte)
     }
 }
 
@@ -222,9 +218,7 @@ decodable! {
 impl Decode for String {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let len = Index::decode(file)?;
-        Ok(dbg!(
-            String::from_utf8_lossy(&file.read(len.as_usize())?).into_owned()
-        ))
+        String::from_utf8(file.read(len.as_usize())?.into()).map_err(invalid_data)
     }
 }
 
@@ -238,10 +232,10 @@ decodable! {
 
     #[derive(Debug)]
     enum InterfaceDescription: u8 {
-        Function(FunctionIdx) = 0x00,
-        Table(TableIdx) = 0x01,
-        Memory(MemoryIdx) = 0x02,
-        Global(GlobalIdx) = 0x03,
+        Function(FunctionIndex) = 0x00,
+        Table(TableIndex) = 0x01,
+        Memory(MemoryIndex) = 0x02,
+        Global(GlobalIndex) = 0x03,
     }
 
     #[derive(Debug)]
@@ -285,7 +279,7 @@ struct Element {
 
 #[derive(Debug)]
 enum ElementMode {
-    Active { table: TableIdx, offset: Expression },
+    Active { table: TableIndex, offset: Expression },
     Passive,
     Declarative,
 }
@@ -296,8 +290,8 @@ impl Decode for Element {
         let mode = match flags {
             0x00 | 0x02 | 0x04 | 0x06 => {
                 let table = match flags {
-                    0x00 | 0x04 => Index::ZERO,
-                    0x02 | 0x06 => Index::decode(file)?,
+                    0x00 | 0x04 => TableIndex(Index::ZERO),
+                    0x02 | 0x06 => TableIndex::decode(file)?,
                     _ => unreachable!(),
                 };
                 let offset = Expression::decode(file)?;
@@ -313,7 +307,7 @@ impl Decode for Element {
         };
         let init = match flags {
             0x00 | 0x01 | 0x02 | 0x03 => {
-                WasmVec::<FunctionIdx>::decode(file)?.map(Expression::from)
+                WasmVec::<FunctionIndex>::decode(file)?.map(Expression::function_call)
             }
             _ => WasmVec::<Expression>::decode(file)?,
         };
@@ -349,15 +343,29 @@ impl Decode for Definition {
     }
 }
 
-type TypeIdx = Index;
-type FunctionIdx = Index;
-type TableIdx = Index;
-type MemoryIdx = Index;
-type GlobalIdx = Index;
-type ElementIdx = Index;
-type DataIdx = Index;
-type LocalIdx = Index;
-type LabelIdx = Index;
+macro_rules! index_ty {
+    ($($ty: ident)+) => {
+        paste::paste! { 
+            decodable! {$(
+                #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+                struct [<$ty Index>](Index);
+            )+}
+        }
+    };
+}
+
+
+index_ty! {
+    Type
+    Function
+    Table
+    Memory
+    Global
+    Element
+    Local
+    Label
+}
+
 
 type MemoryType = Limit;
 type GlobalType = TodoDecode<103>;
@@ -365,7 +373,7 @@ type GlobalType = TodoDecode<103>;
 decodable! {
     #[derive(Debug)]
     struct FunctionSection {
-        signatures: WasmVec<TypeIdx>,
+        signatures: WasmVec<TypeIndex>,
     }
 }
 
@@ -418,14 +426,14 @@ decodable! {
         Loop(BlockType, Expression) = 0x03,
         IfElse(BlockType, IfElseBlock) = 0x04,
         Return = 0x0f,
-        Call(FunctionIdx) = 0x10,
-        CallIndirect(TypeIdx, TableIdx) = 0x11,
+        Call(FunctionIndex) = 0x10,
+        CallIndirect(TypeIndex, TableIndex) = 0x11,
         Drop = 0x1a,
-        LocalGet(LocalIdx) = 0x20,
-        LocalSet(LocalIdx) = 0x21,
-        LocalTee(LocalIdx) = 0x22,
-        GlobalGet(GlobalIdx) = 0x23,
-        GlobalSet(GlobalIdx) = 0x24,
+        LocalGet(LocalIndex) = 0x20,
+        LocalSet(LocalIndex) = 0x21,
+        LocalTee(LocalIndex) = 0x22,
+        GlobalGet(GlobalIndex) = 0x23,
+        GlobalSet(GlobalIndex) = 0x24,
         LoadI32(MemoryArgument) = 0x28,
         LoadI64(MemoryArgument) = 0x29,
         LoadF32(MemoryArgument) = 0x2a,
@@ -463,7 +471,7 @@ decodable! {
         ShruI32 = 0x76,
         RotlI32 = 0x77,
         RotrI32 = 0x78,
-        RefFunc(FunctionIdx) = 0xd2,
+        RefFunc(FunctionIndex) = 0xd2,
     }
 }
 
@@ -471,18 +479,19 @@ decodable! {
 enum BlockType {
     Empty,
     Type(ValueType),
-    TypeIdx(TypeIdx),
+    TypeIndex(TypeIndex),
 }
 
 impl Decode for BlockType {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let byte = file.peek_byte()?;
         if byte == 0x40 {
+            file.read_byte()?;
             Ok(BlockType::Empty)
         } else if byte > 0x40 && byte < 0x80 {
             Ok(BlockType::Type(ValueType::decode(file)?))
         } else {
-            Ok(BlockType::TypeIdx(Index::decode(file)?))
+            Ok(BlockType::TypeIndex(TypeIndex::decode(file)?))
         }
     }
 }
@@ -504,11 +513,13 @@ impl Decode for IfElseBlock {
         let ifso = Expression {
             instructions: vector_from_vec(ifso)?,
         };
-        if file.read_byte()? == INSTRUCTION_ELSE {
-            let ifnot = Expression::decode(file)?;
-            Ok(IfElseBlock::IfElse(ifso, ifnot))
-        } else {
-            Ok(IfElseBlock::If(ifso))
+        match file.read_byte()? { 
+            INSTRUCTION_ELSE => {
+                let ifnot = Expression::decode(file)?;
+                Ok(IfElseBlock::IfElse(ifso, ifnot))
+            }
+            INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
+            _ => unreachable!()
         }
     }
 }
@@ -521,8 +532,8 @@ struct Expression {
     instructions: WasmVec<Instruction>,
 }
 
-impl From<FunctionIdx> for Expression {
-    fn from(idx: FunctionIdx) -> Self {
+impl Expression {
+    fn function_call(idx: FunctionIndex) -> Self {
         Self {
             instructions: WasmVec::from_trusted_box(Box::new([Instruction::RefFunc(idx)])),
         }
