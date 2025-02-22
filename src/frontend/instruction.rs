@@ -2,14 +2,14 @@ use std::io::{Read, Result};
 use crate::frontend::{Decode, invalid_data, BlockType, Expression, FunctionIndex, GlobalIndex, IfElseBlock, LocalIndex, MemoryArgument, TableIndex, TagByte, TypeIndex};
 use crate::read_tape::ReadTape;
 
-macro_rules! present {
-    ($_:tt) => { true  };
-    (     ) => { false };
+macro_rules! absent {
+    ($_:tt) => { false };
+    (     ) => { true  };
 }
 
 macro_rules! instruction {
     ($(
-        $opcode: literal $(-> $u32_code: literal)? $(($($data: ty),*))? => ($ident: ident, $name: literal)
+        ($name: literal, $ident: ident) => $opcode: literal $(-> $u32_code: literal)? $(($($data: ty),*))?
     ),+ $(,)?) => {
         #[derive(Debug, Eq, PartialEq)]
         #[non_exhaustive]
@@ -22,7 +22,7 @@ macro_rules! instruction {
                 let first_byte = file.read_byte()?;
                 Ok(match first_byte {
                     $(
-                        $opcode if !present!($($u32_code)?) => Self::$ident $(($(<$data>::decode(file)?),*))?,
+                        $opcode if !absent!($($u32_code)?) => Self::$ident $(($(<$data>::decode(file)?),*))?,
                     )+
                     _ => {
                         let second_opcode = file.read_leb128::<u32>()?;
@@ -31,8 +31,8 @@ macro_rules! instruction {
                             $(
                                 $(($opcode, $u32_code) => {
                                      Self::$ident $(($(<$data>::decode(file)?),*))?
-                                })?
-                            ),+
+                                },)?
+                            )+
                             _ => return Err(invalid_data(format!("invalid instruction {instruction:?}")))
                         }
                     }
@@ -51,8 +51,8 @@ macro_rules! instruction {
 }
 
 instruction! {
-    0x00 => (Unreachable, "unreachable"),
-    0x01 => (Nop, "nop"),
+    ("unreachable", Unreachable) => 0x00,
+    ("nop", Nop) => 0x01,
 }
 
 // decodable! {
