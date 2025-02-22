@@ -509,11 +509,12 @@ impl Decode for IfElseBlock {
         while !matches!(file.peek_byte()?, INSTRUCTION_ELSE | INSTRUCTION_END) {
             ifso.push(Instruction::decode(file)?);
         }
+        let byte = file.read_byte()?;
 
         let ifso = Expression {
             instructions: vector_from_vec(ifso)?,
         };
-        match file.read_byte()? { 
+        match byte { 
             INSTRUCTION_ELSE => {
                 let ifnot = Expression::decode(file)?;
                 Ok(IfElseBlock::IfElse(ifso, ifnot))
