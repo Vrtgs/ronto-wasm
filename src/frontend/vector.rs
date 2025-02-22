@@ -71,6 +71,16 @@ impl<T> WasmVec<T> {
         unwrap_index_error!(Self::try_from(bx).ok())
     }
 
+    pub fn map<U>(self, map: impl FnMut(T) -> U) -> WasmVec<U> {
+        WasmVec::from_trusted_box(
+            Box::<[T]>::from(self)
+                .into_iter()
+                .map(map)
+                .collect()
+        )
+    }
+    
+    
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {

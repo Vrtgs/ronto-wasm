@@ -72,7 +72,10 @@ macro_rules! impl_decode_naive {
     }
 }
 
-impl_decode_for_int!(u8 i8 u16 i16 u32 i32 u64 i64);
+impl_decode_for_int! {
+    i8 i16 i32 i64 i128
+    u8 u16 u32 u64 u128
+}
 impl_decode_naive!(f32 f64);
 
 impl<T: Decode> Decode for PhantomData<T> {
