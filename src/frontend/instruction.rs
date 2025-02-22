@@ -5,19 +5,15 @@ use crate::frontend::{
 use crate::read_tape::ReadTape;
 use std::io::{Read, Result};
 
-macro_rules! discard {
-    ($_:tt) => {
-        _
-    };
+#[rustfmt::skip]
+macro_rules! ty_param_discard {
+    ($_:ty) => { _ };
 }
 
+#[rustfmt::skip]
 macro_rules! absent {
-    ($_:tt) => {
-        false
-    };
-    (     ) => {
-        true
-    };
+    ($_:tt) => { false };
+    (     ) => { true  };
 }
 
 macro_rules! normalize_match {
@@ -101,7 +97,7 @@ macro_rules! instruction {
         impl Instruction {
             fn name(&self) -> &'static str {
                 match self {
-                    $(Self::$ident$(($(discard!($data)),*))? => $name,)+
+                    $(Self::$ident$(($(ty_param_discard!($data)),*))? => $name,)+
                 }
             }
         }
@@ -109,7 +105,7 @@ macro_rules! instruction {
 }
 
 instruction! {
-        ("unreachable ", Unreachable) => 0x00,
+        ("unreachable", Unreachable) => 0x00,
         ("nop", Nop) => 0x01,
         ("block", Block) => 0x02 (BlockType, Expression),
         ("loop", Loop) => 0x03 (BlockType, Expression),

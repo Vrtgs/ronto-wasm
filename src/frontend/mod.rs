@@ -199,7 +199,7 @@ decodable! {
 
 type Length = PhantomData<Index>;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct TagByte<const TAG: u8>;
 impl<const TAG: u8> Decode for TagByte<TAG> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -419,7 +419,7 @@ decodable! {
         globals: WasmVec<Global>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug,Eq, PartialEq)]
     struct MemoryArgument {
         align: u32,
         offset: u32,
@@ -451,7 +451,7 @@ impl Decode for BlockType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum IfElseBlock {
     If(Expression),
     IfElse(Expression, Expression),
@@ -483,7 +483,7 @@ impl Decode for IfElseBlock {
 const INSTRUCTION_ELSE: u8 = 0x05;
 const INSTRUCTION_END: u8 = 0x0B;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct Expression {
     instructions: WasmVec<Instruction>,
 }
