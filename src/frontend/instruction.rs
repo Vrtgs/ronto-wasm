@@ -1,4 +1,4 @@
-use crate::frontend::{BlockType, Decode, Expression, FunctionIndex, GlobalIndex, IfElseBlock, LocalIndex, MemoryArgument, TableIndex, TagByte, TypeIndex, invalid_data, LabelIndex, RefrenceType, ValueType, DataIndex};
+use crate::frontend::{BlockType, Decode, Expression, FunctionIndex, GlobalIndex, LocalIndex, MemoryArgument, TableIndex, TagByte, TypeIndex, invalid_data, LabelIndex, RefrenceType, ValueType, DataIndex};
 use crate::read_tape::ReadTape;
 use std::io::{Read, Result};
 use crate::frontend::vector::{WasmVec, Index};
