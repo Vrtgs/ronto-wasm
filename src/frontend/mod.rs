@@ -1,6 +1,7 @@
 use crate::frontend::vector::{Index, WasmVec};
 use crate::read_tape::ReadTape;
 use std::error::Error;
+use std::fmt::Formatter;
 use std::io::{self, Read, Result};
 use std::marker::PhantomData;
 
@@ -150,8 +151,13 @@ macro_rules! decodable {
     };
 }
 
-#[derive(Debug)]
 struct CustomSection(WasmVec<u8>);
+
+impl std::fmt::Debug for CustomSection {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomSection").finish_non_exhaustive()
+    }
+}
 
 impl Decode for CustomSection {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -279,7 +285,10 @@ struct Element {
 
 #[derive(Debug)]
 enum ElementMode {
-    Active { table: TableIndex, offset: Expression },
+    Active {
+        table: TableIndex,
+        offset: Expression,
+    },
     Passive,
     Declarative,
 }
@@ -345,7 +354,7 @@ impl Decode for Definition {
 
 macro_rules! index_ty {
     ($($ty: ident)+) => {
-        paste::paste! { 
+        paste::paste! {
             decodable! {$(
                 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
                 struct [<$ty Index>](Index);
@@ -353,7 +362,6 @@ macro_rules! index_ty {
         }
     };
 }
-
 
 index_ty! {
     Type
@@ -365,7 +373,6 @@ index_ty! {
     Local
     Label
 }
-
 
 type MemoryType = Limit;
 type GlobalType = TodoDecode<103>;
@@ -514,13 +521,13 @@ impl Decode for IfElseBlock {
         let ifso = Expression {
             instructions: vector_from_vec(ifso)?,
         };
-        match byte { 
+        match byte {
             INSTRUCTION_ELSE => {
                 let ifnot = Expression::decode(file)?;
                 Ok(IfElseBlock::IfElse(ifso, ifnot))
             }
             INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
-            _ => unreachable!()
+            _ => unreachable!(),
         }
     }
 }
@@ -556,7 +563,8 @@ impl Decode for Expression {
     }
 }
 
-pub struct Binary;
+#[derive(Debug)]
+pub struct Binary(WasmVec<Section>);
 
 impl Decode for Binary {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -566,13 +574,13 @@ impl Decode for Binary {
             "unsupported WASM version"
         )?;
         let mut sections = vec![];
-        while dbg!(file.has_data()?) {
+        while file.has_data()? {
             let section = Section::decode(file)?;
-            println!("{:?}", section);
             sections.push(section);
         }
 
-        Ok(Binary)
+        let sections = vector_from_vec(sections)?;
+        Ok(Binary(sections))
     }
 }
 

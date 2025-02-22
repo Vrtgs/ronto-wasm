@@ -109,9 +109,9 @@ impl<R: Read> ReadTape<R> {
 }
 
 mod sealed {
+    use crate::read_tape::ReadTape;
     use std::io;
     use std::io::Read;
-    use crate::read_tape::ReadTape;
 
     pub trait Sealed: Sized {
         fn read_leb128<R: Read>(reader: &mut ReadTape<R>) -> io::Result<Self>;
@@ -123,7 +123,7 @@ pub trait Int: sealed::Sealed {}
 impl<T: sealed::Sealed> Int for T {}
 
 const CONTINUE_BIT: u8 = 0b10000000;
-const SIGN_BIT: u8     = 0b010000000;
+const SIGN_BIT: u8 = 0b010000000;
 const DATA_BITS: u8 = !CONTINUE_BIT;
 
 macro_rules! impl_int {
@@ -132,7 +132,7 @@ macro_rules! impl_int {
             fn read_leb128<R: Read>(reader: &mut ReadTape<R>) -> io::Result<Self> {
                 #[allow(unused_comparisons)]
                 const IS_SIGNED: bool = const { <$t>::MIN < 0 };
-                
+
                 let mut result = 0 as $t;
                 let mut shift = 0;
                 let mut byte;
@@ -146,12 +146,12 @@ macro_rules! impl_int {
                     }
                     if !IS_SIGNED { shift += 7 }
                 }
-                
+
                 if IS_SIGNED && shift < <$t>::BITS && (byte & SIGN_BIT != 0) {
                     /* sign extend */
                     result |= ((!0) << shift);
                 }
-                
+
                 Ok(result)
             }
         }

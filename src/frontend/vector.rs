@@ -1,6 +1,6 @@
-use std::error::Error;
 use crate::frontend::Decode;
 use crate::read_tape::ReadTape;
+use std::error::Error;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Read;
@@ -17,7 +17,6 @@ impl Decode for Index {
     }
 }
 
-
 #[cold]
 #[inline(never)]
 #[track_caller]
@@ -29,7 +28,7 @@ macro_rules! unwrap_index_error {
     ($res: expr) => {
         match $res {
             Some(x) => x,
-            None => out_of_range_panic()
+            None => out_of_range_panic(),
         }
     };
 }
@@ -42,10 +41,9 @@ const _: () = assert!(
 impl Index {
     pub const ZERO: Self = Self::from_usize(0);
 
-
     pub const fn try_from_usize(index: usize) -> Option<Index> {
         if index >= u32::MAX as usize {
-            return None
+            return None;
         }
 
         Some(Index(index as u32))
@@ -75,14 +73,8 @@ impl<T> WasmVec<T> {
     }
 
     pub fn map<U>(self, map: impl FnMut(T) -> U) -> WasmVec<U> {
-        WasmVec::from_trusted_box(
-            Box::<[T]>::from(self)
-                .into_iter()
-                .map(map)
-                .collect()
-        )
+        WasmVec::from_trusted_box(Box::<[T]>::from(self).into_iter().map(map).collect())
     }
-
 
     /// # Safety
     /// must ensure the vec isn't dropped afterward

@@ -1,1 +1,3 @@
-pub fn execute(_wasm: crate::Binary) {}
+pub fn execute(wasm: crate::Binary) {
+    println!("{:#?}", wasm);
+}
