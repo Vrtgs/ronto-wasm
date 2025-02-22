@@ -10,13 +10,7 @@ macro_rules! ty_param_discard {
     ($_:ty) => { _ };
 }
 
-#[rustfmt::skip]
-macro_rules! absent {
-    ($_:tt) => { false };
-    (     ) => { true  };
-}
-
-macro_rules! normalize_match {
+macro_rules! normalize_match_double {
     (
         match ($expr:expr) {
             {$(($one:literal, $two:literal) => $res_op: expr,)*}
@@ -36,7 +30,7 @@ macro_rules! normalize_match {
             { _ => $fallback: expr }
         }
     ) => {
-        normalize_match! {
+        normalize_match_double! {
             match ($expr) {
                 {$($rest)*}
                 {_ => $fallback}
@@ -51,7 +45,7 @@ macro_rules! normalize_match {
             {_ => $fallback: expr}
         }
     ) => {
-        normalize_match! {
+        normalize_match_double! {
             match ($expr) {
                 {$($rest)*
                 ($one, $two) => $res_op,}
@@ -60,6 +54,52 @@ macro_rules! normalize_match {
         }
     };
 }
+
+macro_rules! normalize_match_single {
+    (
+        match ($expr:expr) {
+            {$(($one:literal, ) => $res_op: expr,)*}
+            {_ => $fallback: expr}
+        }
+    ) => {
+        match ($expr) {
+            $(($one, ) => $res_op,)*
+            _ => $fallback
+        }
+    };
+
+    (
+        match ($expr:expr) {
+            {($one:literal, ) => $res_op: expr,
+            $($rest:tt)*}
+            { _ => $fallback: expr }
+        }
+    ) => {
+        normalize_match_single! {
+            match ($expr) {
+                {$($rest)*
+                ($one, ) => $res_op,}
+                {_ => $fallback}
+            }
+        }
+    };
+
+    (
+        match ($expr:expr) {
+            {($one:literal, $two:literal) => $_: expr,
+            $($rest:tt)*}
+            {_ => $fallback: expr}
+        }
+    ) => {
+        normalize_match_single! {
+            match ($expr) {
+                {$($rest)*}
+                {_ => $fallback}
+            }
+        }
+    };
+}
+
 
 macro_rules! instruction {
     ($(
@@ -74,22 +114,24 @@ macro_rules! instruction {
         impl Decode for Instruction {
             fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
                 let first_byte = file.read_byte()?;
-                Ok(match first_byte {
-                    $(
-                        $opcode if !absent!($($u32_code)?) => Self::$ident $(($(<$data>::decode(file)?),*))?,
-                    )+
-                    _ => {
-                        let second_opcode = file.read_leb128::<u32>()?;
-                        let instruction = (first_byte, second_opcode);
-                        normalize_match!(match (instruction) {
-                            {$(
-                                ($opcode, $($u32_code)?) => {
-                                     Self::$ident $(($(<$data>::decode(file)?),*))?
-                                },
-                            )+}
-                            {_ => return Err(invalid_data(format!("invalid instruction {instruction:?}")))}
-                        })
-                    }
+                
+                normalize_match_single!(match ((first_byte, )) {
+                    {$(
+                        ($opcode, $($u32_code)?) => {
+                             return Ok(Self::$ident $(($(<$data>::decode(file)?),*))?)
+                        },
+                    )+}
+                    {_ => ()}
+                });
+                
+                let second_opcode = file.read_leb128::<u32>()?;
+                normalize_match_double!(match ((first_byte, second_opcode)) {
+                    {$(
+                        ($opcode, $($u32_code)?) => {
+                             Ok(Self::$ident $(($(<$data>::decode(file)?),*))?)
+                        },
+                    )+}
+                    {_ => Err(invalid_data(format!("invalid instruction (0x{first_byte:02X}, 0x{second_opcode:02X})")))}
                 })
             }
         }
