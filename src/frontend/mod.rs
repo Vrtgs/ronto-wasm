@@ -133,6 +133,24 @@ macro_rules! decodable {
         }
         decodable! { $($next)* }
     };
+    {$(#[$($meta:tt)*])* struct $name:ident ($($type:ty),* $(,)?); $($next:tt)*} => {
+        $(#[$($meta)*])*
+        struct $name (
+            $(
+            $type,
+            )*
+        );
+        impl Decode for $name {
+            fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+                Ok(Self(
+                    $(
+                    <$type>::decode(file)?,
+                    )*
+                ))
+            }
+        }
+        decodable! { $($next)* }
+    };
 }
 
 #[derive(Debug)]
