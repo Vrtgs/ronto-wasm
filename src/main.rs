@@ -1,3 +1,5 @@
+#![recursion_limit = "1024"]
+
 use clap::Parser;
 use std::fs::File;
 use std::io::BufReader;
@@ -7,7 +9,7 @@ mod backend;
 mod frontend;
 mod read_tape;
 
-use frontend::Binary;
+use frontend::WasmBinary;
 
 #[derive(Parser)]
 struct Cli {

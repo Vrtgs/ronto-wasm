@@ -168,6 +168,13 @@ impl Decode for CustomSection {
 }
 
 decodable! {
+    // TODO: merge ValueType and RefrenceType
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    enum RefrenceType: u8 {
+        FuncRef = 0x70,
+        ExternRef = 0x6F,
+    }
+    
     #[derive(Debug, Clone, Eq, PartialEq)]
     enum ValueType: u8 {
         I32 = 0x7F,
@@ -370,6 +377,7 @@ index_ty! {
     Memory
     Global
     Element
+    Data
     Local
     Label
 }
@@ -511,10 +519,20 @@ impl Decode for Expression {
     }
 }
 
-#[derive(Debug)]
-pub struct Binary(WasmVec<Section>);
 
-impl Decode for Binary {
+#[derive(Debug)]
+#[non_exhaustive]
+enum WasmVersion {
+    Version1
+}
+
+#[derive(Debug)]
+pub struct WasmBinary {
+    version: WasmVersion,
+    sections: WasmVec<Section>
+}
+
+impl Decode for WasmBinary {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         expect!(file.read_chunk()? == *b"\0asm", "invalid data")?;
         expect!(
@@ -528,11 +546,14 @@ impl Decode for Binary {
         }
 
         let sections = vector_from_vec(sections)?;
-        Ok(Binary(sections))
+        Ok(WasmBinary {
+            version: WasmVersion::Version1,
+            sections,
+        })
     }
 }
 
-pub fn parse_file(file: impl Read) -> Result<Binary> {
+pub fn parse_file(file: impl Read) -> Result<WasmBinary> {
     let mut file = ReadTape::new(file);
-    Binary::decode(&mut file)
+    WasmBinary::decode(&mut file)
 }

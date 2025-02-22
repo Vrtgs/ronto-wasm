@@ -80,7 +80,7 @@ impl<T> WasmVec<T> {
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
         let ptr = std::ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len.as_usize());
-        Box::from_raw(ptr)
+        unsafe { Box::from_raw(ptr) }
     }
 }
 
