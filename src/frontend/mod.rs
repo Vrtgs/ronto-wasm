@@ -421,6 +421,8 @@ decodable! {
         Store8I64(MemoryArgument) = 0x3c,
         Store16I64(MemoryArgument) = 0x3d,
         Store32I64(MemoryArgument) = 0x3e,
+        MemorySize(TagByte<0x00>) = 0x3f,
+        MemoryGrow(TagByte<0x00>) = 0x40,
         ConstI32(i32) = 0x41,
         ConstI64(i64) = 0x42,
         ConstF32(f32) = 0x43,
@@ -443,8 +445,7 @@ decodable! {
         ShruI32 = 0x76,
         RotlI32 = 0x77,
         RotrI32 = 0x78,
-        MemorySize(TagByte<0x00>) = 0x3f,
-        MemoryGrow(TagByte<0x00>) = 0x40,
+        RefFunc(FunctionIdx) = 0xd2,
     }
 }
 
