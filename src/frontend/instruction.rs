@@ -2,6 +2,10 @@ use std::io::{Read, Result};
 use crate::frontend::{Decode, invalid_data, BlockType, Expression, FunctionIndex, GlobalIndex, IfElseBlock, LocalIndex, MemoryArgument, TableIndex, TagByte, TypeIndex};
 use crate::read_tape::ReadTape;
 
+macro_rules! discard {
+    ($_:tt) => { _ };
+}
+
 macro_rules! absent {
     ($_:tt) => { false };
     (     ) => { true  };
@@ -19,7 +23,7 @@ macro_rules! normalize_match {
             _ => $fallback
         }
     };
-    
+
     (
         match ($expr:expr) {
             {($one:literal, ) => $_: expr,
@@ -34,7 +38,7 @@ macro_rules! normalize_match {
             }
         }
     };
-    
+
     (
         match ($expr:expr) {
             {($one:literal, $two:literal) => $res_op: expr,
@@ -61,7 +65,7 @@ macro_rules! instruction {
         pub enum Instruction {
             $($ident $(($($data),*))? ),+
         }
-        
+
         impl Decode for Instruction {
             fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
                 let first_byte = file.read_byte()?;
@@ -84,11 +88,11 @@ macro_rules! instruction {
                 })
             }
         }
-        
+
         impl Instruction {
             fn name(&self) -> &'static str {
                 match self {
-                    $(Self::$ident$(($($data: ty),*))? => $name,)+
+                    $(Self::$ident$(($(discard!($data)),*))? => $name,)+
                 }
             }
         }
