@@ -1,11 +1,14 @@
 use crate::parser::{
-    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex,
-    MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType,
+    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock,
+    LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte,
+    TypeIndex, ValueType,
 };
 use crate::read_tape::ReadTape;
-use crate::runtime::{MemoryError, MemoryFault, ReferenceValue, Validator, Value, ValueInner, WasmContext};
+use crate::runtime::{
+    MemoryError, MemoryFault, ReferenceValue, Validator, Value, ValueInner, WasmContext,
+};
 use crate::vector::{Index, WasmVec};
-use crate::{invalid_data, Stack};
+use crate::{Stack, invalid_data};
 use bytemuck::Pod;
 use std::convert::Infallible;
 use std::io::{Read, Result};
@@ -247,7 +250,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-Primitive<Data, In, Out, F>
+    Primitive<Data, In, Out, F>
 {
     pub const fn full(f: F) -> Self {
         Self {
@@ -313,7 +316,9 @@ impl Param for Infallible {
         validator.set_unreachable()
     }
 
-    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> { unreachable!() }
+    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> {
+        unreachable!()
+    }
     fn pop(_: &mut Vec<Value>) -> Self {
         unreachable!()
     }
@@ -358,7 +363,7 @@ pub trait InstructionCode<Data> {
 }
 
 impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-InstructionCode<Data> for Primitive<Data, In, Out, F>
+    InstructionCode<Data> for Primitive<Data, In, Out, F>
 {
     fn validate(&self, _: Data, validator: &mut Validator) -> bool {
         let res = In::pop_validation_input(validator);
@@ -430,9 +435,9 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
 
         ends_with(validator, input)
             && expr
-            .instructions
-            .iter()
-            .all(|inst| inst.validate(validator))
+                .instructions
+                .iter()
+                .all(|inst| inst.validate(validator))
             && ends_with(validator, out)
     }
 
@@ -466,11 +471,7 @@ flag!(BranchBehavior { CONDITIONAL }; true = Conditional; false = Unconditional)
 struct IfBlock;
 
 impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
-    fn validate(
-        &self,
-        _: (&BlockType, &IfElseBlock),
-        validator: &mut Validator,
-    ) -> bool {
+    fn validate(&self, _: (&BlockType, &IfElseBlock), validator: &mut Validator) -> bool {
         u32::pop_validation_input(validator)
     }
 
@@ -481,12 +482,12 @@ impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
     ) -> ExecutionResult {
         let (if_so, if_not) = match expr {
             IfElseBlock::If(expr) => (&*expr.instructions, &[][..]),
-            IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions)
+            IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions),
         };
 
         let instr = match u32::pop(context.stack) {
             0 => if_not,
-            _ => if_so
+            _ => if_so,
         };
 
         for instruction in instr {
@@ -503,7 +504,6 @@ impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
         Ok(())
     }
 }
-
 
 struct Branch<T>(PhantomData<T>);
 
@@ -585,7 +585,9 @@ impl InstructionCode<&ReferenceType> for RefNull {
 
     fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
         match ref_ty {
-            ReferenceType::Function => context.push(Value::Ref(ReferenceValue::Function(Function::NULL))),
+            ReferenceType::Function => {
+                context.push(Value::Ref(ReferenceValue::Function(Function::NULL)))
+            }
             ReferenceType::Extern => context.push(Value::Ref(ReferenceValue::Extern(Extern::NULL))),
         }
         Ok(())
@@ -608,9 +610,15 @@ impl InstructionCode<&Function> for Call {
 }
 
 impl InstructionCode<(&Table, &Type)> for Call {
-    fn validate(&self, _: (&Table, &Type), _: &mut Validator) -> bool { todo!() }
+    fn validate(&self, _: (&Table, &Type), _: &mut Validator) -> bool {
+        todo!()
+    }
 
-    fn call(&self, (&table_idx, &type_idx): (&Table, &Type), context: &mut WasmContext) -> ExecutionResult {
+    fn call(
+        &self,
+        (&table_idx, &type_idx): (&Table, &Type),
+        context: &mut WasmContext,
+    ) -> ExecutionResult {
         let idx = Index(u32::pop(context.stack));
         let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
             unreachable!();
@@ -823,7 +831,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-for CastingMemoryAccess<T, E, A>
+    for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {

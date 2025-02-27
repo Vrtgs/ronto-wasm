@@ -908,7 +908,9 @@ impl Decode for WasmBinary {
                 Section::Element(elements) => insert_section!(element, elements.0),
                 Section::Code(code) => insert_section!(code, code.0),
                 Section::Data(data) => insert_section!(data, data.0),
-                Section::DataCount(WithLength(DataCountSection(count))) => insert_section!(data_count, count),
+                Section::DataCount(WithLength(DataCountSection(count))) => {
+                    insert_section!(data_count, count)
+                }
             }
         }
 

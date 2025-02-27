@@ -1,14 +1,19 @@
 use crate::instruction::{ExecutionError, Param};
-use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
+use crate::parser::{
+    Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType,
+    ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
+    ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
+    WasmSections, WasmVersion,
+};
 use crate::runtime::memory_buffer::{MemoryBuffer, OutOfMemory};
 use crate::vector::{Index, WasmVec};
-use crate::{invalid_data, Stack as _};
+use crate::{Stack as _, invalid_data};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,7 +59,9 @@ impl Value {
             ValueType::ReferenceType(ReferenceType::Function) => {
                 Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
             }
-            ValueType::ReferenceType(ReferenceType::Extern) => Value::Ref(ReferenceValue::Extern(ExternIndex::NULL)),
+            ValueType::ReferenceType(ReferenceType::Extern) => {
+                Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
+            }
         }
     }
 
@@ -356,11 +363,11 @@ impl TryFrom<TableValue> for Table {
         let reserve = value.limits.min.as_usize();
         Ok(match value.element_type {
             ReferenceType::Function => Table::FunctionTable(WasmVec::from_trusted_box(
-                vec![FunctionIndex::NULL; reserve].into()
+                vec![FunctionIndex::NULL; reserve].into(),
             )),
             ReferenceType::Extern => Table::ExternTable(WasmVec::from_trusted_box(
-                vec![ExternIndex::NULL; reserve].into()
-            ))
+                vec![ExternIndex::NULL; reserve].into(),
+            )),
         })
     }
 }
@@ -427,7 +434,7 @@ impl WasmEnvironment {
                     (ImportDescription::Memory(_), Import::Memory(buffer)) => {
                         (None, None, Some(buffer))
                     }
-                    _ => return Err(invalid_data("mismatched import type"))
+                    _ => return Err(invalid_data("mismatched import type")),
                 })
             })
             .collect::<io::Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
@@ -449,22 +456,18 @@ impl WasmEnvironment {
             )
             .collect::<Box<[_]>>();
 
-        let wasm_defined_globals = sections
-            .global
-            .map(|glob| glob.globals)
-            .unwrap_or_default();
+        let wasm_defined_globals = sections.global.map(|glob| glob.globals).unwrap_or_default();
 
-        let (global_constructors, global_stubs) =
-            imported_globals.into_iter()
-                .flatten()
-                .map(|val| (None, val))
-                .chain(
-                    wasm_defined_globals
-                        .into_iter()
-                        .map(|glob| (Some(glob.expression), GlobalValue::new(glob.r#type)))
-                )
-                .unzip::<_, _, Vec<_>, Vec<_>>();
-
+        let (global_constructors, global_stubs) = imported_globals
+            .into_iter()
+            .flatten()
+            .map(|val| (None, val))
+            .chain(
+                wasm_defined_globals
+                    .into_iter()
+                    .map(|glob| (Some(glob.expression), GlobalValue::new(glob.r#type))),
+            )
+            .unzip::<_, _, Vec<_>, Vec<_>>();
 
         let mut this = WasmEnvironment {
             types: sections.r#type.map(|sec| sec.functions).unwrap_or_default(),
@@ -526,27 +529,33 @@ impl WasmEnvironment {
 
     pub fn new<'a, S1: Into<Cow<'a, str>>, S2: Into<Cow<'a, str>>>(
         binary: WasmBinary,
-        imports: impl IntoIterator<Item=((S1, S2), Import)>,
+        imports: impl IntoIterator<Item = ((S1, S2), Import)>,
     ) -> io::Result<Self> {
         let prelude_imports = match binary.version {
             WasmVersion::Version1 => iter::empty(),
         };
 
-        let imports = imports.into_iter().map(|((s1, s2), i)| ((s1.into(), s2.into()), {
-            Resolve {
-                import: i,
-                prelude: false,
-            }
-        }));
+        let imports = imports.into_iter().map(|((s1, s2), i)| {
+            ((s1.into(), s2.into()), {
+                Resolve {
+                    import: i,
+                    prelude: false,
+                }
+            })
+        });
 
         let mut imports_object = HashMap::new();
         for ((module, name), import) in prelude_imports.chain(imports) {
             match imports_object.entry((module, name)) {
                 Entry::Occupied(entry) => {
                     let (module, name) = entry.key();
-                    return Err(invalid_data(format!("duplicate import key [{module}]::[{name}]")));
+                    return Err(invalid_data(format!(
+                        "duplicate import key [{module}]::[{name}]"
+                    )));
                 }
-                Entry::Vacant(entry) => { entry.insert(import); }
+                Entry::Vacant(entry) => {
+                    entry.insert(import);
+                }
             }
         }
 
@@ -566,14 +575,20 @@ impl WasmEnvironment {
         self.types.get(index.0)
     }
 
-    pub fn call_unchecked(&self, function: FunctionIndex, stack: &mut Vec<Value>) -> Result<(), ()> {
+    pub fn call_unchecked(
+        &self,
+        function: FunctionIndex,
+        stack: &mut Vec<Value>,
+    ) -> Result<(), ()> {
         let Some(function) = self.functions.get(function.0) else {
             return Err(());
         };
 
         let locals = match &function.body {
             Body::WasmDefined(wasm_func) => {
-                let params = self.types.get(function.r#type.0)
+                let params = self
+                    .types
+                    .get(function.r#type.0)
                     .expect("function should have valid type info")
                     .parameters
                     .iter()
@@ -583,10 +598,12 @@ impl WasmEnvironment {
                         val
                     });
 
-                let locals = params.chain(wasm_func.locals.iter().map(|&ty| Value::new(ty))).collect::<Box<[_]>>();
+                let locals = params
+                    .chain(wasm_func.locals.iter().map(|&ty| Value::new(ty)))
+                    .collect::<Box<[_]>>();
                 WasmVec::from_trusted_box(locals)
             }
-            Body::Import(_) => const { WasmVec::new() }
+            Body::Import(_) => const { WasmVec::new() },
         };
 
         let mut context = WasmContext {
@@ -612,14 +629,18 @@ impl WasmEnvironment {
         Ok(res)
     }
 
-    pub fn call_by_name<T: Param, U: Param>(&self, function: &str, parameter: T) -> Result<U, CallByNameError> {
+    pub fn call_by_name<T: Param, U: Param>(
+        &self,
+        function: &str,
+        parameter: T,
+    ) -> Result<U, CallByNameError> {
         self.exports
             .get(function)
             .ok_or(CallByNameError::ExportNotFound)
             .and_then(|interface| match *interface {
-                ExportDescription::Function(idx) => {
-                    self.call(idx, parameter).map_err(|()| CallByNameError::Trap)
-                }
+                ExportDescription::Function(idx) => self
+                    .call(idx, parameter)
+                    .map_err(|()| CallByNameError::Trap),
                 _ => Err(CallByNameError::ExportTypeError),
             })
     }
@@ -833,7 +854,6 @@ impl<'a> Validator<'a> {
     }
 }
 
-
 pub struct WasmContext<'a> {
     pub(crate) environment: &'a WasmEnvironment,
     pub(crate) locals: WasmVec<Value>,
@@ -847,6 +867,22 @@ impl WasmContext<'_> {
 
     pub(crate) fn get_local(&mut self, local: LocalIndex) -> Option<&mut Value> {
         self.locals.get_mut(local.0)
+    }
+
+    pub(crate) fn table_load(
+        &self,
+        table_index: TableIndex,
+        index: Index,
+    ) -> Option<ReferenceValue> {
+        self.environment
+            .tables
+            .get(table_index.0)
+            .and_then(|table| match table {
+                Table::FunctionTable(table) => {
+                    table.get(index).copied().map(ReferenceValue::Function)
+                }
+                Table::ExternTable(table) => table.get(index).copied().map(ReferenceValue::Extern),
+            })
     }
 
     pub(crate) fn mem_load<T: Pod>(
@@ -908,7 +944,9 @@ impl WasmContext<'_> {
                         Mut64Type::Ref(ref_ty) => {
                             let idx = Index(bits as u32);
                             Value::Ref(match ref_ty {
-                                ReferenceType::Function => ReferenceValue::Function(FunctionIndex(idx)),
+                                ReferenceType::Function => {
+                                    ReferenceValue::Function(FunctionIndex(idx))
+                                }
                                 ReferenceType::Extern => ReferenceValue::Extern(ExternIndex(idx)),
                             })
                         }
@@ -948,15 +986,16 @@ impl WasmContext<'_> {
 }
 
 pub fn execute(wasm: WasmBinary) {
-    let import_object = [
-        (("console", "log"), Import::Function(Box::new(|cntx| {
+    let import_object = [(
+        ("console", "log"),
+        Import::Function(Box::new(|cntx| {
             let Some(Value::I32(int)) = cntx.pop() else {
                 unreachable!()
             };
             println!("{}", int);
             Ok(())
-        })))
-    ];
+        })),
+    )];
 
     let env = WasmEnvironment::new(wasm, import_object).unwrap();
     env.start().unwrap()

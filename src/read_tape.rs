@@ -181,8 +181,8 @@ impl<R: Read> ReadTape<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
     use paste::paste;
+    use proptest::prelude::*;
 
     macro_rules! test_leb128 {
         () => {};
