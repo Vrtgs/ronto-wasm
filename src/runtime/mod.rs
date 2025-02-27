@@ -1,20 +1,18 @@
 use crate::instruction::{ExecutionError, Param};
-use crate::parser::{
-    Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType,
-    ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
-    RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
-};
+use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{io, iter};
 
 mod memory_buffer;
 
@@ -190,11 +188,52 @@ impl GlobalValue {
             }
         }
     }
+
+    fn store_mut(&mut self, value: Value) -> Result<(), ()> {
+        match *self {
+            GlobalValue::Immutable(ref mut val) => {
+                if val.r#type() != value.r#type() {
+                    return Err(());
+                }
+                *val = value;
+            }
+            GlobalValue::Mutable64(ref mut loc, ty) => {
+                let loc = loc.get_mut();
+                match (value, ty) {
+                    (Value::I64(bits), Mut64Type::I64) => *loc = bits as u64,
+                    (Value::F64(bits), Mut64Type::F64) => *loc = bits.to_bits(),
+                    (Value::F32(bits), Mut64Type::F32) => *loc = bits.to_bits() as u64,
+                    (Value::I32(bits), Mut64Type::I32) => *loc = bits as u32 as u64,
+                    (
+                        Value::ExternRef(ExternIndex(index)),
+                        Mut64Type::Ref(RefrenceType::ExternRef),
+                    )
+                    | (
+                        Value::FunctionRef(FunctionIndex(index)),
+                        Mut64Type::Ref(RefrenceType::FunctionRef),
+                    ) => *loc = index.0 as u64,
+                    _ => return Err(()),
+                }
+            }
+            GlobalValue::Mutable128(ref mut loc) => {
+                let Value::V128(val_128) = value else {
+                    return Err(());
+                };
+                *loc = AtomicCell::new(val_128);
+            }
+        }
+
+        Ok(())
+    }
 }
 
+type NativeFunction = dyn Fn(&mut WasmContext) -> Result<(), ()>;
+
+#[expect(dead_code)]
 struct ImportedFunction {
+    module: Box<str>,
     name: Box<str>,
-    body: Box<dyn Fn(&mut WasmContext) -> Result<(), ()>>,
+    body: Box<NativeFunction>,
 }
 
 struct WasmFunction {
@@ -238,13 +277,16 @@ pub enum Import {
     Memory(MemoryBuffer),
 }
 
-impl WasmEnvironment {
-    pub fn new(
-        bin: WasmBinary,
-        mut imports: HashMap<String, Import>,
-    ) -> io::Result<Self> {
-        let sections = bin.sections;
+struct Resolve {
+    import: Import,
+    prelude: bool,
+}
 
+impl WasmEnvironment {
+    fn with_resolver(
+        sections: WasmSections,
+        mut imports: HashMap<(Cow<str>, Cow<str>), Resolve>,
+    ) -> io::Result<Self> {
         let function_types = sections
             .function
             .map(|fun| fun.signatures)
@@ -259,15 +301,18 @@ impl WasmEnvironment {
         let (imported_functions, imported_globals, _) = import_stubs
             .into_iter()
             .map(|imp| {
-                let name = format!("{module}::{name}", module = imp.module, name = imp.name).into_boxed_str();
-                let import = imports.remove(&*name)
-                    .ok_or_else(|| invalid_data(format!("unresolved import {name}")))?;
+                let (module, name) = (imp.module, imp.name);
+                let key = (Cow::Owned(module.into()), Cow::Owned(name.into()));
+                let import = imports.remove(&key).ok_or_else(|| {
+                    invalid_data(format!("unresolved import [{}]::[{}]", key.0, key.1))
+                })?;
 
-                Ok(match (imp.description, import) {
+                let (module, name) = (key.0.into_owned().into(), key.1.into_owned().into());
+                Ok(match (imp.description, import.import) {
                     (ImportDescription::Function(r#type), Import::Function(body)) => {
                         let func = Function {
                             r#type,
-                            body: Body::Import(ImportedFunction { name, body }),
+                            body: Body::Import(ImportedFunction { module, name, body }),
                         };
                         (Some(func), None, None)
                     }
@@ -361,46 +406,46 @@ impl WasmEnvironment {
             globals_stack
                 .pop()
                 .and_then(|x| globals_stack.is_empty().then_some(x))
-                .and_then(|new_value| {
-                    let global = &mut (*this.globals)[i];
-                    match *global {
-                        GlobalValue::Immutable(ref mut val) => {
-                            if val.r#type() != new_value.r#type() {
-                                return None;
-                            }
-                            *val = new_value;
-                        }
-                        GlobalValue::Mutable64(ref mut loc, ty) => {
-                            let loc = loc.get_mut();
-                            match (new_value, ty) {
-                                (Value::I64(bits), Mut64Type::I64) => *loc = bits as u64,
-                                (Value::F64(bits), Mut64Type::F64) => *loc = bits.to_bits(),
-                                (Value::F32(bits), Mut64Type::F32) => *loc = bits.to_bits() as u64,
-                                (Value::I32(bits), Mut64Type::I32) => *loc = bits as u32 as u64,
-                                (
-                                    Value::ExternRef(ExternIndex(index)),
-                                    Mut64Type::Ref(RefrenceType::ExternRef),
-                                )
-                                | (
-                                    Value::FunctionRef(FunctionIndex(index)),
-                                    Mut64Type::Ref(RefrenceType::FunctionRef),
-                                ) => *loc = index.0 as u64,
-                                _ => return None,
-                            }
-                        }
-                        GlobalValue::Mutable128(ref mut loc) => {
-                            let Value::V128(val_128) = new_value else {
-                                return None;
-                            };
-                            *loc = AtomicCell::new(val_128);
-                        }
-                    }
-                    Some(())
-                })
+                .and_then(|new_value| (*this.globals)[i].store_mut(new_value).ok())
                 .ok_or_else(|| invalid_data("Global initialization failed, invalid return"))?;
         }
 
+        for ((module, name), resolve) in imports {
+            if !resolve.prelude {
+                eprintln!("warning unused import: [{module}]::[{name}]")
+            }
+        }
+
         Ok(this)
+    }
+
+    pub fn new<'a, S1: Into<Cow<'a, str>>, S2: Into<Cow<'a, str>>>(
+        binary: WasmBinary,
+        imports: impl IntoIterator<Item=((S1, S2), Import)>,
+    ) -> io::Result<Self> {
+        let prelude_imports = match binary.version {
+            WasmVersion::Version1 => iter::empty(),
+        };
+
+        let imports = imports.into_iter().map(|((s1, s2), i)| ((s1.into(), s2.into()), {
+            Resolve {
+                import: i,
+                prelude: false,
+            }
+        }));
+
+        let mut imports_object = HashMap::new();
+        for ((module, name), import) in prelude_imports.chain(imports) {
+            match imports_object.entry((module, name)) {
+                Entry::Occupied(entry) => {
+                    let (module, name) = entry.key();
+                    return Err(invalid_data(format!("duplicate import key [{module}]::[{name}]")));
+                }
+                Entry::Vacant(entry) => { entry.insert(import); }
+            }
+        }
+
+        Self::with_resolver(binary.sections, imports_object)
     }
 }
 
@@ -826,19 +871,16 @@ impl WasmContext<'_> {
 }
 
 pub fn execute(wasm: WasmBinary) {
-    let mapa_hash = HashMap::from([
-        // ("console::log".to_string(),
-        //  Import::Function(Box::new(|cntx| {
-        //      let Some(Value::I32(int)) = cntx.pop() else {
-        //          unreachable!()
-        //      };
-        //      println!("{}", int);
-        //      Ok(())
-        //  }))),
-        // ("env::from_rust".to_string(), Import::Global(Value::I32(99)))
-    ]);
+    let import_object = [
+        (("console", "log"), Import::Function(Box::new(|cntx| {
+            let Some(Value::I32(int)) = cntx.pop() else {
+                unreachable!()
+            };
+            println!("{}", int);
+            Ok(())
+        })))
+    ];
 
-    let env = WasmEnvironment::new(wasm, mapa_hash).unwrap();
-    let res = env.call_by_name::<_, i64>("fool_and_3ds", 4).unwrap();
-    println!("{res}")
+    let env = WasmEnvironment::new(wasm, import_object).unwrap();
+    env.start().unwrap()
 }

@@ -375,7 +375,7 @@ decodable! {
 }
 
 #[derive(Debug)]
-struct WithLength<T>(T);
+pub struct WithLength<T>(pub T);
 
 impl<T: Decode> Decode for WithLength<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -392,8 +392,6 @@ impl<T: Decode> Decode for WithLength<T> {
         Ok(Self(ret))
     }
 }
-
-type Length = PhantomData<Index>;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TagByte<const TAG: u8>;
@@ -493,7 +491,6 @@ decodable! {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct Element {
     pub kind: ElementKind,
     pub init: WasmVec<Expression>,
@@ -501,7 +498,6 @@ pub struct Element {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub enum ElementMode {
     Active { index: Index, offset: Expression },
     Passive,
@@ -581,7 +577,9 @@ macro_rules! index_ty {
 
             $(
                 impl [<$ty Index>] {
+                    #[allow(unused)]
                     pub const ZERO: Self = Self(Index::ZERO);
+                    #[allow(unused)]
                     pub const MAX: Self  = Self(Index::MAX);
                 }
             )+
@@ -692,7 +690,7 @@ impl Decode for Limit {
 decodable! {
     #[derive(Debug)]
     struct TableValue {
-        element_type: ValueType,
+        element_type: RefrenceType,
         limits: Limit,
     }
 
@@ -764,7 +762,6 @@ impl Decode for BlockType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[expect(dead_code)]
 pub enum IfElseBlock {
     If(Expression),
     IfElse(Expression, Expression),
@@ -852,6 +849,7 @@ pub struct WasmSections {
     pub element: Option<ElementSection>,
     pub code: Option<CodeSection>,
     pub data: Option<DataSection>,
+    pub data_count: Option<u32>,
     pub start: Option<FunctionIndex>,
 }
 
@@ -878,6 +876,7 @@ impl Decode for WasmBinary {
             element: None,
             code: None,
             data: None,
+            data_count: None,
             start: None,
         };
 
@@ -909,7 +908,7 @@ impl Decode for WasmBinary {
                 Section::Element(elements) => insert_section!(element, elements.0),
                 Section::Code(code) => insert_section!(code, code.0),
                 Section::Data(data) => insert_section!(data, data.0),
-                Section::DataCount(..) => unreachable!(),
+                Section::DataCount(WithLength(DataCountSection(count))) => insert_section!(data_count, count),
             }
         }
 

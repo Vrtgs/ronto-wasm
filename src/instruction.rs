@@ -174,6 +174,7 @@ macro_rules! instruction {
                 match self {
                     $(Self::$ident$(($($data),*))? => {
                         let primitive = &const { $code };
+                        #[allow(unused_parens)]
                         InstructionCode::<($(($(&$data),*))?)>::call(primitive, ($(($($data),*))?), context)
                     },)+
                 }
@@ -279,9 +280,7 @@ macro_rules! impl_param_for_tuple {
             }
 
             fn pop_checked(context: &mut Vec<Value>) -> Option<Self> {
-                let Some([$( [<t $T>] ),+]) = context.pop_n() else {
-                    return None;
-                };
+                let [$( [<t $T>] ),+] = context.pop_n()?;
                 Some(($([<T $T>]::from([<t $T>]).unwrap()),+,))
             }
 
@@ -980,12 +979,6 @@ macro_rules! cmp {
     };
 }
 
-macro_rules! cmp {
-    ($ty:ty; $cmp: tt) => {
-        compare!(a: $ty, b: $ty; a $cmp b)
-    };
-}
-
 macro_rules! bin_op {
     (wrapping (a: $ty1:ty, b: $ty2:ty); $name:ident) => { in_out!(a: $ty1, b: $ty2; paste::paste!{ <$ty1>::[<wrapping _ $name>](a, b) }) };
     ((a: $ty1:ty, b: $ty2:ty); $name:ident) => { in_out!(a: $ty1, b: $ty2; <$ty1>::$name(a, b)) };
@@ -1118,7 +1111,7 @@ instruction! {
     ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument) code: store!(i64 ==> i16),
     ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument) code: store!(i64 ==> i32),
 
-    ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, grow_by: u32, ctx| {
+    ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, (), ctx| {
         Ok(ctx.mem_size(MemoryIndex::ZERO)?.0)
     }),
     ("memory.grow",  MemoryGrow) => 0x40 (NullByte) code: Primitive::full(|_, grow_by: u32, ctx| {
