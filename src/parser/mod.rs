@@ -1,3 +1,4 @@
+use std::any::type_name;
 use crate::read_tape::ReadTape;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Result};
@@ -380,7 +381,13 @@ impl<T: Decode> Decode for WithLength<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let length = Index::decode(file)?.as_usize();
         let buffer = file.read(length)?.into_vec();
-        let tape = ReadTape::memory_buffer(buffer);
+        let mut tape = ReadTape::memory_buffer(buffer);
+        let ret = T::decode(&mut tape)?;
+        if tape.has_data()? { 
+            return Err(invalid_data(format!("`{}` has more data than was decoded", type_name::<T>())))
+        }
+        
+        Ok(Self(ret))
     }
 }
 
