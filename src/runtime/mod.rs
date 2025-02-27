@@ -6,7 +6,7 @@ use crate::parser::{
 };
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::vector::{Index, WasmVec};
-use crate::{Stack as _, invalid_data};
+use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
 use std::cell::RefCell;
@@ -192,7 +192,7 @@ impl GlobalValue {
     }
 }
 
-struct Import {
+struct ImportedFunction {
     name: Box<str>,
     body: Box<dyn Fn(&mut WasmContext) -> Result<(), ()>>,
 }
@@ -204,7 +204,7 @@ struct WasmFunction {
 
 enum Body {
     WasmDefined(WasmFunction),
-    Import(Import),
+    Import(ImportedFunction),
 }
 
 struct Function {
@@ -232,12 +232,18 @@ pub struct WasmEnvironment {
     exports: HashMap<Box<str>, ExportDescription>,
 }
 
+pub enum Import {
+    Function(Box<dyn Fn(&mut WasmContext) -> Result<(), ()>>),
+    Global(Value),
+    Memory(MemoryBuffer),
+}
+
 impl WasmEnvironment {
-    fn new(
+    pub fn new(
         bin: WasmBinary,
-        mut imports: HashMap<String, Box<dyn Fn(&mut WasmContext) -> Result<(), ()>>>,
+        mut imports: HashMap<String, Import>,
     ) -> io::Result<Self> {
-        let sections = dbg!(bin).sections;
+        let sections = bin.sections;
 
         let function_types = sections
             .function
@@ -250,26 +256,35 @@ impl WasmEnvironment {
 
         let import_stubs = sections.import.map(|fun| fun.imports).unwrap_or_default();
 
-        let functions = import_stubs
+        let (imported_functions, imported_globals, _) = import_stubs
             .into_iter()
             .map(|imp| {
-                let name = format!("{module}::{name}", module = imp.module, name = imp.name)
-                    .into_boxed_str();
-                let body = imports.remove(&*name).unwrap_or_else(|| {
-                    let name = name.clone();
-                    Box::new(move |_| {
-                        eprintln!("unresolved import ({name})");
-                        Err(())
-                    })
-                });
-                Function {
-                    r#type: match imp.description {
-                        ImportDescription::Function(r#type) => TypeIndex(r#type.0),
-                        _ => unreachable!(),
-                    },
-                    body: Body::Import(Import { name, body }),
-                }
+                let name = format!("{module}::{name}", module = imp.module, name = imp.name).into_boxed_str();
+                let import = imports.remove(&*name)
+                    .ok_or_else(|| invalid_data(format!("unresolved import {name}")))?;
+
+                Ok(match (imp.description, import) {
+                    (ImportDescription::Function(r#type), Import::Function(body)) => {
+                        let func = Function {
+                            r#type,
+                            body: Body::Import(ImportedFunction { name, body }),
+                        };
+                        (Some(func), None, None)
+                    }
+                    (ImportDescription::Global(_), Import::Global(value)) => {
+                        (None, Some(GlobalValue::Immutable(value)), None)
+                    }
+                    (ImportDescription::Memory(_), Import::Memory(buffer)) => {
+                        (None, None, Some(buffer))
+                    }
+                    _ => return Err(invalid_data("mismatched import type"))
+                })
             })
+            .collect::<io::Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
+
+        let functions = imported_functions
+            .into_iter()
+            .flatten()
             .chain(
                 wasm_functions
                     .into_iter()
@@ -284,15 +299,22 @@ impl WasmEnvironment {
             )
             .collect::<Box<[_]>>();
 
-        let (global_constructors, global_stubs) = sections
+        let wasm_defined_globals = sections
             .global
-            .map(|glob| {
-                glob.globals
-                    .into_iter()
-                    .map(|glob| (glob.expression, GlobalValue::new(glob.r#type)))
-                    .unzip::<_, _, Vec<_>, Vec<_>>()
-            })
+            .map(|glob| glob.globals)
             .unwrap_or_default();
+
+        let (global_constructors, global_stubs) =
+            imported_globals.into_iter()
+                .flatten()
+                .map(|val| (None, val))
+                .chain(
+                    wasm_defined_globals
+                        .into_iter()
+                        .map(|glob| (Some(glob.expression), GlobalValue::new(glob.r#type)))
+                )
+                .unzip::<_, _, Vec<_>, Vec<_>>();
+
 
         let mut this = WasmEnvironment {
             types: sections.r#type.map(|sec| sec.functions).unwrap_or_default(),
@@ -322,7 +344,12 @@ impl WasmEnvironment {
         };
 
         let mut globals_stack = vec![];
-        for (i, global_constructor) in global_constructors.into_iter().enumerate() {
+        let constructors = global_constructors
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, expr)| expr.map(|expr| (i, expr)));
+
+        for (i, global_constructor) in constructors {
             let mut context = WasmContext {
                 environment: &this,
                 locals: const { WasmVec::new() },
@@ -396,7 +423,7 @@ impl WasmEnvironment {
 
         let locals = match &function.body {
             Body::WasmDefined(wasm_func) => wasm_func.locals.map_ref(|&ty| Value::new(ty)),
-            Body::Import(_) => const { WasmVec::new() },
+            Body::Import(_) => const { WasmVec::new() }
         };
         let stack = stack
             .map(Stack::Parent)
@@ -800,16 +827,17 @@ impl WasmContext<'_> {
 }
 
 pub fn execute(wasm: WasmBinary) {
-    let mapa_hash = HashMap::from([(
-        "console::log".to_string(),
-        Box::new(|cntx: &mut WasmContext| {
-            let Some(Value::I32(int)) = cntx.pop() else {
-                unreachable!()
-            };
-            println!("{}", int);
-            Ok(())
-        }) as Box<_>,
-    )]);
+    let mapa_hash = HashMap::from([
+        ("console::log".to_string(),
+         Import::Function(Box::new(|cntx| {
+             let Some(Value::I32(int)) = cntx.pop() else {
+                 unreachable!()
+             };
+             println!("{}", int);
+             Ok(())
+         }))),
+        ("env::from_rust".to_string(), Import::Global(Value::I32(99)))
+    ]);
 
     let env = WasmEnvironment::new(wasm, mapa_hash).unwrap();
     env.start().unwrap()

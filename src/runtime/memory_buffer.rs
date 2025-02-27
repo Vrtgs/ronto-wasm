@@ -4,6 +4,7 @@ use crate::vector::Index;
 use bytemuck::Pod;
 use std::cell::RefCell;
 use std::fmt::Formatter;
+use std::rc::Rc;
 
 const PAGE_SIZE: u32 = 65536;
 
@@ -60,9 +61,10 @@ impl MemoryArgument for parser::MemoryArgument {
     }
 }
 
+#[derive(Clone)]
 pub struct MemoryBuffer {
     limit: Limit,
-    buffer: RefCell<Vec<u8>>,
+    buffer: Rc<RefCell<Vec<u8>>>,
 }
 
 macro_rules! assign_or {
@@ -100,7 +102,7 @@ impl MemoryBuffer {
     pub fn new(limit: Limit) -> Result<Self, OutOfMemory> {
         let this = Self {
             limit,
-            buffer: RefCell::new(Vec::new()),
+            buffer: Rc::new(RefCell::new(Vec::new())),
         };
         if limit.min != Index::ZERO {
             this.grow(limit.min)?;
