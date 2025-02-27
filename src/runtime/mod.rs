@@ -1,8 +1,8 @@
 use crate::instruction::ExecutionError;
 use crate::parser::{
-    Data, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, InterfaceDescription,
-    LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, RefrenceType, TableIndex,
-    TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
+    Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType,
+    ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
+    RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
 };
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::vector::{Index, WasmVec};
@@ -229,7 +229,7 @@ pub struct WasmEnvironment {
     globals: WasmVec<GlobalValue>,
     data: WasmVec<Data>,
     start: Option<FunctionIndex>,
-    exports: HashMap<Box<str>, InterfaceDescription>,
+    exports: HashMap<Box<str>, ExportDescription>,
 }
 
 impl WasmEnvironment {
@@ -264,7 +264,7 @@ impl WasmEnvironment {
                 });
                 Function {
                     r#type: match imp.description {
-                        InterfaceDescription::Function(r#type) => TypeIndex(r#type.0),
+                        ImportDescription::Function(r#type) => TypeIndex(r#type.0),
                         _ => unreachable!(),
                     },
                     body: Body::Import(Import { name, body }),
@@ -422,7 +422,7 @@ impl WasmEnvironment {
             .get(function)
             .ok_or(CallByNameError::ExportNotFound)
             .and_then(|interface| match *interface {
-                InterfaceDescription::Function(idx) => {
+                ExportDescription::Function(idx) => {
                     self.call(idx).map_err(|()| CallByNameError::Trap)
                 }
                 _ => Err(CallByNameError::ExportTypeError),

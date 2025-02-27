@@ -1,5 +1,5 @@
-use std::any::type_name;
 use crate::read_tape::ReadTape;
+use std::any::type_name;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Result};
 use std::marker::PhantomData;
@@ -383,8 +383,11 @@ impl<T: Decode> Decode for WithLength<T> {
         let buffer = file.read(length)?.into_vec();
         let mut tape = ReadTape::memory_buffer(buffer);
         let ret = T::decode(&mut tape)?;
-        if tape.has_data()? { 
-            return Err(invalid_data(format!("`{}` has more data than was decoded", type_name::<T>())))
+        if tape.has_data()? {
+            return Err(invalid_data(format!(
+                "`{}` has more data than was decoded",
+                type_name::<T>()
+            )));
         }
         Ok(Self(ret))
     }
@@ -429,15 +432,21 @@ decodable! {
     struct Import {
         module: Box<str>,
         name: Box<str>,
-        description: InterfaceDescription,
+        description: ImportDescription,
     }
 
     #[derive(Debug)]
-    enum InterfaceDescription: u8 {
-        Function(FunctionIndex) = 0x00,
-        Table(TableIndex) = 0x01,
-        Memory(MemoryIndex) = 0x02,
-        Global(GlobalIndex) = 0x03,
+    struct TableType {
+        reftype: ValueType,
+        limits: Limit,
+    }
+
+    #[derive(Debug)]
+    enum ImportDescription: u8 {
+        Function(TypeIndex) = 0x00,
+        Table(TableType) = 0x01,
+        Memory(MemoryType) = 0x02,
+        Global(GlobalType) = 0x03,
     }
 
     #[derive(Debug)]
@@ -448,7 +457,15 @@ decodable! {
     #[derive(Debug)]
     struct Export {
         name: Box<str>,
-        description: InterfaceDescription,
+        description: ExportDescription,
+    }
+
+    #[derive(Debug)]
+    enum ExportDescription: u8 {
+        Function(FunctionIndex) = 0x00,
+        Table(TableIndex) = 0x01,
+        Memory(MemoryIndex) = 0x02,
+        Global(GlobalIndex) = 0x03,
     }
 
     #[derive(Debug)]
