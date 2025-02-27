@@ -763,9 +763,9 @@ impl Decode for BlockType {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[expect(dead_code)]
-enum IfElseBlock {
+pub enum IfElseBlock {
     If(Expression),
     IfElse(Expression, Expression),
 }

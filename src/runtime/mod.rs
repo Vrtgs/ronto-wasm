@@ -1,4 +1,4 @@
-use crate::instruction::ExecutionError;
+use crate::instruction::{ExecutionError, Param};
 use crate::parser::{
     Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType,
     ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
@@ -353,7 +353,7 @@ impl WasmEnvironment {
             let mut context = WasmContext {
                 environment: &this,
                 locals: const { WasmVec::new() },
-                stack: Stack::Parent(&mut globals_stack),
+                stack: &mut globals_stack,
             };
             execute_expr!(global_constructor, context)
                 .map_err(|_| invalid_data("Global initialization trapped"))?;
@@ -416,18 +416,29 @@ impl WasmEnvironment {
         self.types.get(index.0)
     }
 
-    pub fn _call(&self, function: FunctionIndex, stack: Option<&mut Vec<Value>>) -> Result<(), ()> {
+    pub fn call_unchecked(&self, function: FunctionIndex, stack: &mut Vec<Value>) -> Result<(), ()> {
         let Some(function) = self.functions.get(function.0) else {
             return Err(());
         };
 
         let locals = match &function.body {
-            Body::WasmDefined(wasm_func) => wasm_func.locals.map_ref(|&ty| Value::new(ty)),
+            Body::WasmDefined(wasm_func) => {
+                let params = self.types.get(function.r#type.0)
+                    .expect("function should have valid type info")
+                    .parameters
+                    .iter()
+                    .map(|ty| {
+                        let val = stack.pop().unwrap();
+                        assert_eq!(val.r#type(), *ty);
+                        val
+                    });
+
+                let locals = params.chain(wasm_func.locals.iter().map(|&ty| Value::new(ty))).collect::<Box<[_]>>();
+                WasmVec::from_trusted_box(locals)
+            }
             Body::Import(_) => const { WasmVec::new() }
         };
-        let stack = stack
-            .map(Stack::Parent)
-            .unwrap_or(const { Stack::Owned(vec![]) });
+
         let mut context = WasmContext {
             environment: self,
             locals,
@@ -440,17 +451,24 @@ impl WasmEnvironment {
         }
     }
 
-    pub fn call(&self, function: FunctionIndex) -> Result<(), ()> {
-        self._call(function, None)
+    pub fn call<T: Param, U: Param>(&self, function: FunctionIndex, parameter: T) -> Result<U, ()> {
+        let mut stack = vec![];
+        T::push(parameter, &mut stack);
+        self.call_unchecked(function, &mut stack)?;
+        let res = U::pop_checked(&mut stack).ok_or(())?;
+        if !stack.is_empty() {
+            return Err(());
+        }
+        Ok(res)
     }
 
-    pub fn call_by_name(&self, function: &str) -> Result<(), CallByNameError> {
+    pub fn call_by_name<T: Param, U: Param>(&self, function: &str, parameter: T) -> Result<U, CallByNameError> {
         self.exports
             .get(function)
             .ok_or(CallByNameError::ExportNotFound)
             .and_then(|interface| match *interface {
                 ExportDescription::Function(idx) => {
-                    self.call(idx).map_err(|()| CallByNameError::Trap)
+                    self.call(idx, parameter).map_err(|()| CallByNameError::Trap)
                 }
                 _ => Err(CallByNameError::ExportTypeError),
             })
@@ -458,17 +476,11 @@ impl WasmEnvironment {
 
     pub fn start(&self) -> Result<(), CallByNameError> {
         if let Some(start) = self.start {
-            return self.call(start).map_err(|()| CallByNameError::Trap);
+            return self.call(start, ()).map_err(|()| CallByNameError::Trap);
         }
 
-        self.call_by_name("main")
+        self.call_by_name("main", ())
     }
-}
-
-#[derive(Debug)]
-enum Stack<'a> {
-    Owned(Vec<Value>),
-    Parent(&'a mut Vec<Value>),
 }
 
 struct Frame {
@@ -671,29 +683,16 @@ impl<'a> Validator<'a> {
     }
 }
 
+
 pub struct WasmContext<'a> {
     pub(crate) environment: &'a WasmEnvironment,
     pub(crate) locals: WasmVec<Value>,
-    stack: Stack<'a>,
+    pub(crate) stack: &'a mut Vec<Value>,
 }
 
 impl WasmContext<'_> {
     pub fn call(&mut self, function: FunctionIndex) -> Result<(), ()> {
-        self.environment._call(function, Some(self.stack()))
-    }
-
-    fn stack(&mut self) -> &mut Vec<Value> {
-        match &mut self.stack {
-            Stack::Owned(stack) => stack,
-            Stack::Parent(par) => par,
-        }
-    }
-
-    fn stack_ref(&self) -> &[Value] {
-        match &self.stack {
-            Stack::Owned(stack) => stack,
-            Stack::Parent(par) => par,
-        }
+        self.environment.call_unchecked(function, self.stack)
     }
 
     pub(crate) fn get_local(&mut self, local: LocalIndex) -> Option<&mut Value> {
@@ -806,39 +805,40 @@ impl WasmContext<'_> {
     }
 
     pub(crate) fn peek(&self) -> Option<&Value> {
-        self.stack_ref().last()
+        self.stack.last()
     }
 
     pub(crate) fn pop(&mut self) -> Option<Value> {
-        self.stack().pop()
+        self.stack.pop()
     }
 
     pub(crate) fn pop_n<const N: usize>(&mut self) -> Option<[Value; N]> {
-        self.stack().pop_n()
+        self.stack.pop_n()
     }
 
     pub(crate) fn push(&mut self, value: Value) {
-        self.stack().push(value)
+        self.stack.push(value)
     }
 
     pub(crate) fn push_n<const N: usize>(&mut self, data: [Value; N]) {
-        self.stack().push_n(data)
+        self.stack.push_n(data)
     }
 }
 
 pub fn execute(wasm: WasmBinary) {
     let mapa_hash = HashMap::from([
-        ("console::log".to_string(),
-         Import::Function(Box::new(|cntx| {
-             let Some(Value::I32(int)) = cntx.pop() else {
-                 unreachable!()
-             };
-             println!("{}", int);
-             Ok(())
-         }))),
-        ("env::from_rust".to_string(), Import::Global(Value::I32(99)))
+        // ("console::log".to_string(),
+        //  Import::Function(Box::new(|cntx| {
+        //      let Some(Value::I32(int)) = cntx.pop() else {
+        //          unreachable!()
+        //      };
+        //      println!("{}", int);
+        //      Ok(())
+        //  }))),
+        // ("env::from_rust".to_string(), Import::Global(Value::I32(99)))
     ]);
 
     let env = WasmEnvironment::new(wasm, mapa_hash).unwrap();
-    env.start().unwrap()
+    let res = env.call_by_name::<_, i64>("fool_and_3ds", 4).unwrap();
+    println!("{res}")
 }
