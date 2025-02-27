@@ -1,16 +1,7 @@
 use crate::read_tape::ReadTape;
-use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{self, Read, Result};
+use std::io::{Read, Result};
 use std::marker::PhantomData;
-
-mod vector;
-
-pub use vector::*;
-
-fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, err)
-}
 
 fn vector_from_vec<T>(vec: Vec<T>) -> Result<WasmVec<T>> {
     WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
@@ -25,16 +16,8 @@ macro_rules! expect {
     }
 }
 
-trait Decode: Sized {
+pub(crate) trait Decode: Sized {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self>;
-}
-
-#[derive(Debug)]
-struct TodoDecode<const N: usize>;
-impl<const N: usize> Decode for TodoDecode<N> {
-    fn decode(_: &mut ReadTape<impl Read>) -> Result<Self> {
-        todo!("todo decode#{}", N)
-    }
 }
 
 impl Decode for bool {
@@ -71,15 +54,28 @@ macro_rules! impl_decode_naive {
     }
 }
 
-impl_decode_for_int! {
-    i8 i16 i32 i64
-    u8 u16 u32 u64
+impl Decode for u8 {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        file.read_byte()
+    }
 }
-impl_decode_naive!(
+
+impl Decode for i8 {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        u8::decode(file).map(|byte| byte as i8)
+    }
+}
+
+impl_decode_for_int! {
+    i16 i32 i64
+    u16 u32 u64
+}
+
+impl_decode_naive! {
     f32 f64
-    // even though it's called leb**128**, the spec decided that v128 should be encoded just as na immediate
+    // u128 is encoded as just naive bytes
     i128 u128
-);
+}
 
 impl<T: Decode> Decode for PhantomData<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
@@ -91,18 +87,63 @@ impl<T: Decode> Decode for PhantomData<T> {
 trait Enum: Sized {
     type Discriminant: Decode + Debug + Display + Copy + Clone + 'static;
     const VARIANTS: &'static [Self::Discriminant];
-    fn enum_try_decode(variant: Self::Discriminant, file: &mut ReadTape<impl Read>) -> Option<Result<Self>>;
+    
+    fn discriminant(&self) -> Self::Discriminant;
+    
+    fn enum_try_decode(
+        variant: Self::Discriminant,
+        file: &mut ReadTape<impl Read>,
+    ) -> Option<Result<Self>>;
 }
 
 impl<E: Enum> Decode for E {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let variant = E::Discriminant::decode(file)?;
-        Self::enum_try_decode(variant, file).ok_or_else(|| invalid_data(format!(
-            "invalid {name}: {variant}, expected one of: {expected:?}",
-            name = std::any::type_name::<Self>(),
-            expected = E::VARIANTS
-        )))?
+        Self::enum_try_decode(variant, file).ok_or_else(|| {
+            invalid_data(format!(
+                "invalid {name}: {variant}, expected one of: {expected:?}",
+                name = std::any::type_name::<Self>(),
+                expected = E::VARIANTS
+            ))
+        })?
     }
+}
+
+macro_rules! discard {
+    ($type: ty) => { _ };
+}
+
+macro_rules! filter_discard {
+    ($([$ident: ident])*) => { Self { $($ident),* } };
+    ([_] $($tt:tt)*) => { filter_discard!($($tt)*) };
+    ([$ident:ident] $($tt:tt)*) => { filter_discard!($($tt)* [$ident]) };
+}
+
+macro_rules! normalize_struct {
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $($vis:vis $field:ident : $type:ty),* }) => {
+        $(#[$($meta)*])*
+        $outer_vis struct $name { 
+            $($vis $field : $type),*
+        }
+    };
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis _ : $type:ty $(, $($next:tt)*)? }) => {
+        normalize_struct! {
+            $(#[$($meta)*])*
+            $outer_vis struct $name {
+                $($($next)*)?
+            }
+        }
+    };
+    
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis $ident:ident : $type:ty $(, $($next:tt)*)? }) => {
+        normalize_struct! {
+            $(#[$($meta)*])*
+            $outer_vis struct $name {
+                $($($next)*)?
+                $vis $ident: $type
+            }
+        }
+    };
 }
 
 macro_rules! decodable {
@@ -113,20 +154,20 @@ macro_rules! decodable {
             $first_ty($first_ty)
             $(, $rest($rest))*
         }
-        
+
         impl Enum for $name {
             type Discriminant = <$first_ty as Enum>::Discriminant;
             #[doc(hidden)]
             const VARIANTS: &[Self::Discriminant] = &{
                 let mut union_discriminants = [0; {<$first_ty as Enum>::VARIANTS.len() $(+ <$rest as Enum>::VARIANTS.len())*}];
                 let mut i = 0;
-                
+
                 let arrs = [<$first_ty as Enum>::VARIANTS $(, <$rest as Enum>::VARIANTS)*];
-                
+
                 let mut arrs_cursor: &[_] = &arrs;
                 while let [next, rest @ ..] = arrs_cursor {
                     arrs_cursor = rest;
-                    
+
                     let mut arr_cursor = *next;
                     while let [discriminant, rest @ ..] = arr_cursor {
                         arr_cursor = rest;
@@ -134,9 +175,9 @@ macro_rules! decodable {
                         i += 1;
                     }
                 }
-                
+
                 assert!(i == union_discriminants.len(), "couldn't fill discriminant array");
-                
+
                 let mut i = 0;
                 while i < union_discriminants.len() {
                     let mut j = i+1;
@@ -148,10 +189,18 @@ macro_rules! decodable {
                     }
                     i += 1;
                 }
-                
-                
+
+
                 union_discriminants
             };
+
+            #[inline(always)]
+            fn discriminant(&self) -> Self::Discriminant {
+                match self {
+                    Self::$first_ty(x) => <$first_ty as Enum>::discriminant(x),
+                    $(Self::$rest(x) => <$rest as Enum>::discriminant(x)),*
+                }
+            }
             
             #[doc(hidden)]
             #[inline(always)]
@@ -161,61 +210,89 @@ macro_rules! decodable {
             }
         }
         
+        impl From<$first_ty> for $name {
+            fn from(value: $first_ty) -> Self {
+                Self::$first_ty(value)
+            }
+        }
+
+        $(impl From<$rest> for $name {
+            fn from(value: $rest) -> Self {
+                Self::$rest(value)
+            }
+        })*
+        
         decodable! { $($next)* }
     };
-    {$(#[$($meta:tt)*])* enum $name:ident: $type: ty { $($variant:ident $(($($inner:ty),*))? = $value:expr),+ $(,)? } $($next:tt)*} => {
-        #[repr($type)]
+    {$(#[$($meta:tt)*])* enum $name:ident: $type: ty { $($variant:ident $(($($inner:ty),*))? $({ $($ident:ident: $named_ty:ty),* })? = $value:expr),+ $(,)? } $($next:tt)*} => {
         $(#[$($meta)*])*
         pub enum $name {
-            $($variant $(($($inner,)*))?= $value),*
+            $($variant $(($($inner,)*))? $({ $($ident: $named_ty),* })?),*
         }
-        
+
         impl Enum for $name {
             type Discriminant = $type;
             #[doc(hidden)]
             const VARIANTS: &[$type] = &[$($value),*];
-            #[doc(hidden)]
+            
+            fn discriminant(&self) -> Self::Discriminant {
+                match *self {
+                    $(Self::$variant $(($(discard!($inner),)*))? $({ $($ident: _),* })? => $value),*
+                }
+            }
+            
             #[inline(always)]
             fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
                 match variant {
                     $(
                     $value => {
-                        Some(Ok($name::$variant$((
-                            $(
-                            {
-                                match <$inner>::decode(_file) {
-                                    Ok(x) => x,
-                                    Err(err) => return Some(Err(err))
+                        Some(Ok($name::$variant
+                            $((
+                                $(
+                                {
+                                    match <$inner>::decode(_file) {
+                                        Ok(x) => x,
+                                        Err(err) => return Some(Err(err))
+                                    }
                                 }
-                            }
-                            ),*
-                        ))?))
+                                ),*
+                            ))?
+                            $({
+                                $(
+                                $ident: {
+                                    match <$named_ty>::decode(_file) {
+                                        Ok(x) => x,
+                                        Err(err) => return Some(Err(err))
+                                    }
+                                }
+                                ),*
+                            })?
+                        ))
                     },
                     )*
                     _ => None,
                 }
             }
         }
-        
+
         decodable! { $($next)* }
     };
-    {$(#[$($meta:tt)*])* struct $name:ident { $($field:ident : $type:ty),* $(,)? } $($next:tt)*} => {
-        $(#[$($meta)*])*
-        pub struct $name {
-            $(
-            pub $field: $type,
-            )*
+    {$(#[$($meta:tt)*])* struct $name:ident { $($field:tt : $type:ty),+ $(,)? } $($next:tt)*} => {
+        normalize_struct!{
+            $(#[$($meta)*])*
+            pub struct $name {
+                $(
+                pub $field: $type,
+                )*
+            }
         }
         impl Decode for $name {
             fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
                 $(
                 let $field = <$type>::decode(file)?;
                 )*
-                Ok(Self {
-                    $(
-                    $field,
-                    )*
-                })
+                
+                Ok(filter_discard!($([$field])*))
             }
         }
         decodable! { $($next)* }
@@ -260,21 +337,21 @@ impl Decode for CustomSection {
 decodable! {
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     enum RefrenceType: u8 {
-        FuncRef = 0x70,
+        FunctionRef = 0x70,
         ExternRef = 0x6F,
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    enum NumericValue: u8 {
-        I32 = 0x7F,
-        I64 = 0x7E,
-        F32 = 0x7D,
-        F64 = 0x7C,
+    enum NumericType: u8 {
+        I32  = 0x7F,
+        I64  = 0x7E,
+        F32  = 0x7D,
+        F64  = 0x7C,
         V128 = 0x7B,
     }
-    
+
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    union ValueType = NumericValue | RefrenceType;
+    union ValueType = NumericType | RefrenceType;
 
     #[derive(Debug)]
     enum Section: u8 {
@@ -286,17 +363,17 @@ decodable! {
         Memory(Length, MemorySection) = 0x05,
         Global(Length, GlobalSection) = 0x06,
         Export(Length, ExportSection) = 0x07,
-        Start(Length, TodoDecode<6>) = 0x08,
+        Start(Length, StartSection) = 0x08,
         Element(Length, ElementSection) = 0x09,
         Code(Length, CodeSection) = 0x0a,
-        Data(Length, TodoDecode<9>) = 0x0b,
-        DataCount(Length, TodoDecode<10>) = 0x0c,
+        Data(Length, DataSection) = 0x0b,
+        DataCount(Length, DataCountSection) = 0x0c,
     }
 }
 
 type Length = PhantomData<Index>;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct TagByte<const TAG: u8>;
 
 impl<const TAG: u8> Decode for TagByte<TAG> {
@@ -307,15 +384,15 @@ impl<const TAG: u8> Decode for TagByte<TAG> {
 
 decodable! {
     #[derive(Debug)]
-    struct FuncType {
-        _signature: TagByte<0x60>,
+    struct TypeInfo {
+        _: TagByte<0x60>,
         parameters: WasmVec<ValueType>,
         result: WasmVec<ValueType>,
     }
 
     #[derive(Debug)]
     struct TypeSection {
-        functions: WasmVec<FuncType>,
+        functions: WasmVec<TypeInfo>,
     }
 }
 
@@ -370,8 +447,11 @@ decodable! {
 
     #[derive(Debug)]
     struct CodeSection {
-        definitions: WasmVec<Definition>,
+        definitions: WasmVec<FunctionDefinition>,
     }
+    
+    #[derive(Debug)]
+    struct StartSection(FunctionIndex);
 }
 
 #[derive(Debug)]
@@ -385,10 +465,7 @@ pub struct Element {
 #[derive(Debug)]
 #[expect(dead_code)]
 pub enum ElementMode {
-    Active {
-        table: TableIndex,
-        offset: Expression,
-    },
+    Active { index: Index, offset: Expression },
     Passive,
     Declarative,
 }
@@ -399,12 +476,15 @@ impl Decode for Element {
         let mode = match flags {
             0x00 | 0x02 | 0x04 | 0x06 => {
                 let table = match flags {
-                    0x00 | 0x04 => TableIndex(Index::ZERO),
+                    0x00 | 0x04 => TableIndex::ZERO,
                     0x02 | 0x06 => TableIndex::decode(file)?,
                     _ => unreachable!(),
                 };
                 let offset = Expression::decode(file)?;
-                ElementMode::Active { table, offset }
+                ElementMode::Active {
+                    index: table.0,
+                    offset,
+                }
             }
             0x01 | 0x05 => ElementMode::Passive,
             0x03 | 0x07 => ElementMode::Declarative,
@@ -426,9 +506,9 @@ impl Decode for Element {
 }
 
 #[derive(Debug)]
-struct Definition {
-    locals: WasmVec<ValueType>,
-    body: Expression,
+pub struct FunctionDefinition {
+    pub locals: WasmVec<ValueType>,
+    pub body: Expression,
 }
 
 impl<T: Decode, U: Decode> Decode for (T, U) {
@@ -437,7 +517,7 @@ impl<T: Decode, U: Decode> Decode for (T, U) {
     }
 }
 
-impl Decode for Definition {
+impl Decode for FunctionDefinition {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let _ = u32::decode(file)?;
         let count = Index::decode(file)?;
@@ -448,7 +528,7 @@ impl Decode for Definition {
         }
         let locals = vector_from_vec(locals)?;
         let body = Expression::decode(file)?;
-        Ok(Definition { locals, body })
+        Ok(FunctionDefinition { locals, body })
     }
 }
 
@@ -456,9 +536,17 @@ macro_rules! index_ty {
     ($($ty: ident)+) => {
         paste::paste! {
             decodable! {$(
-                #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+                #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+                #[repr(transparent)]
                 struct [<$ty Index>](Index);
             )+}
+            
+            $(
+                impl [<$ty Index>] {
+                    pub const ZERO: Self = Self(Index::ZERO);
+                    pub const MAX: Self  = Self(Index::MAX);
+                }
+            )+
         }
     };
 }
@@ -473,12 +561,19 @@ index_ty! {
     Data
     Local
     Label
+    
+    Extern
 }
 
-#[expect(dead_code)]
+impl FunctionIndex {
+    pub const NULL: Self = Self::MAX;
+}
+
+impl ExternIndex {
+    pub const NULL: Self = Self::MAX;
+}
+
 type MemoryType = Limit;
-#[expect(dead_code)]
-type GlobalType = TodoDecode<103>;
 
 decodable! {
     #[derive(Debug)]
@@ -487,22 +582,85 @@ decodable! {
     }
 }
 
+pub struct Data {
+    pub init: WasmVec<u8>,
+    pub mode: ElementMode,
+}
+
+impl Decode for Data {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let mode = match u32::decode(file)? {
+            0 => ElementMode::Active {
+                index: MemoryIndex::ZERO.0,
+                offset: Expression::decode(file)?,
+            },
+            1 => ElementMode::Passive,
+            2 => ElementMode::Active {
+                index: MemoryIndex::decode(file)?.0,
+                offset: Expression::decode(file)?,
+            },
+            variant => return Err(invalid_data(format!("invalid data variant: {variant}"))),
+        };
+        let data_len = Index::decode(file)?;
+        let bytes = file
+            .read(data_len.as_usize())
+            .map(WasmVec::from_trusted_box)?;
+
+        Ok(Data { init: bytes, mode })
+    }
+}
+
+impl Debug for Data {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        struct BytesPreview<'a>(&'a [u8]);
+        impl Debug for BytesPreview<'_> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                let mut debug_list = f.debug_list();
+                match self.0.len() {
+                    len @ ..=4 => debug_list.entries(&self.0[..len]).finish(),
+                    _ => debug_list.entries(&self.0[..4]).finish_non_exhaustive(),
+                }
+            }
+        }
+
+        f.debug_struct("Data")
+            .field("init", &BytesPreview(&self.init))
+            .field("mode", &self.mode)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Limit {
+    pub min: Index,
+    pub max: Index
+}
+
+impl Decode for Limit {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let bounded = bool::decode(file)?;
+        let min = Index::decode(file)?;
+        let max = match bounded {
+            true => Index::decode(file)?,
+            false => Index::MAX
+        };
+        if max < min { 
+            return Err(invalid_data("degenerate limit encountered; max < min"))
+        }
+        Ok(Limit { min, max })
+    }
+}
+
 decodable! {
     #[derive(Debug)]
-    enum Limit: u8 {
-        HalfBounded(Index) = 0x00,
-        Bounded(Index, Index) = 0x01,
-    }
-
-    #[derive(Debug)]
-    struct TableType {
+    struct TableValue {
         element_type: ValueType,
         limits: Limit,
     }
 
     #[derive(Debug)]
     struct TableSection {
-        tables: WasmVec<TableType>,
+        tables: WasmVec<TableValue>,
     }
 
     #[derive(Debug)]
@@ -511,9 +669,14 @@ decodable! {
     }
 
     #[derive(Debug)]
-    struct Global {
+    struct GlobalType {
         value_type: ValueType,
-        is_mutable: bool,
+        mutable: bool,
+    }
+
+    #[derive(Debug)]
+    struct Global {
+        r#type: GlobalType,
         expression: Expression,
     }
 
@@ -521,20 +684,28 @@ decodable! {
     struct GlobalSection {
         globals: WasmVec<Global>,
     }
+    
+    #[derive(Debug)]
+    struct DataSection {
+        data: WasmVec<Data>,
+    }
+    
+    #[derive(Debug)]
+    struct DataCountSection(u32);
 
-    #[derive(Debug,Eq, PartialEq)]
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     struct MemoryArgument {
-        align: u32,
-        offset: u32,
+        align: Index,
+        offset: Index,
     }
 }
 
-mod instruction;
+pub use crate::instruction::Instruction;
+use crate::invalid_data;
+use crate::vector::{Index, WasmVec};
 
-use instruction::Instruction;
-
-#[derive(Debug, Eq, PartialEq)]
-enum BlockType {
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum BlockType {
     Empty,
     Type(ValueType),
     TypeIndex(TypeIndex),
@@ -561,6 +732,9 @@ enum IfElseBlock {
     IfElse(Expression, Expression),
 }
 
+const INSTRUCTION_ELSE: u8 = 0x05;
+const INSTRUCTION_END: u8 = 0x0B;
+
 impl Decode for IfElseBlock {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let mut ifso = vec![];
@@ -584,12 +758,9 @@ impl Decode for IfElseBlock {
     }
 }
 
-const INSTRUCTION_ELSE: u8 = 0x05;
-const INSTRUCTION_END: u8 = 0x0B;
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Expression {
-    instructions: WasmVec<Instruction>,
+    pub instructions: WasmVec<Instruction>,
 }
 
 impl Expression {
@@ -615,43 +786,98 @@ impl Decode for Expression {
     }
 }
 
-
 #[derive(Debug)]
 #[non_exhaustive]
-enum WasmVersion {
-    Version1
+pub enum WasmVersion {
+    Version1,
 }
 
 impl Decode for WasmVersion {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        match u32::from_le_bytes(file.read_chunk()?) { 
+        match u32::from_le_bytes(file.read_chunk()?) {
             1 => Ok(WasmVersion::Version1),
-            _ => Err(invalid_data("unsupported WASM version"))
+            _ => Err(invalid_data("unsupported WASM version")),
         }
     }
 }
 
 #[derive(Debug)]
+pub struct WasmSections {
+    pub custom: WasmVec<CustomSection>,
+    pub r#type: Option<TypeSection>,
+    pub import: Option<ImportSection>,
+    pub function: Option<FunctionSection>,
+    pub table: Option<TableSection>,
+    pub memory: Option<MemorySection>,
+    pub global: Option<GlobalSection>,
+    pub export: Option<ExportSection>,
+    pub element: Option<ElementSection>,
+    pub code: Option<CodeSection>,
+    pub data: Option<DataSection>,
+    pub start: Option<FunctionIndex>,
+}
+
+#[derive(Debug)]
 pub struct WasmBinary {
-    version: WasmVersion,
-    sections: WasmVec<Section>
+    pub version: WasmVersion,
+    pub sections: WasmSections,
 }
 
 impl Decode for WasmBinary {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         expect!(file.read_chunk()? == *b"\0asm", "invalid data")?;
         let version = WasmVersion::decode(file)?;
-        let mut sections = vec![];
-        while file.has_data()? {
-            let section = Section::decode(file)?;
-            sections.push(section);
+        let mut custom_sections = vec![];
+        let mut sections = WasmSections {
+            custom: WasmVec::new(),
+            r#type: None,
+            import: None,
+            function: None,
+            table: None,
+            memory: None,
+            global: None,
+            export: None,
+            element: None,
+            code: None,
+            data: None,
+            start: None
+        };
+
+        macro_rules! insert_section {
+            ($opt: ident, $expr: expr) => {
+                match sections.$opt {
+                    Some(_) => {
+                        return Err(invalid_data(format!(
+                            "duplicate {} section",
+                            stringify!($opt)
+                        )))
+                    }
+                    None => sections.$opt = Some($expr),
+                }
+            };
         }
 
-        let sections = vector_from_vec(sections)?;
-        Ok(WasmBinary {
-            version,
-            sections,
-        })
+        while file.has_data()? {
+            match Section::decode(file)? {
+                Section::Custom(section) => custom_sections.push(section),
+                Section::Type(_, type_shit) => insert_section!(r#type, type_shit),
+                Section::Import(_, imports) => insert_section!(import, imports),
+                Section::Function(_, functions) => insert_section!(function, functions),
+                Section::Table(_, tables) => insert_section!(table, tables),
+                Section::Memory(_, memories) => insert_section!(memory, memories),
+                Section::Global(_, globals) => insert_section!(global, globals),
+                Section::Export(_, exports) => insert_section!(export, exports),
+                Section::Start(_, start) => insert_section!(start, start.0),
+                Section::Element(_, elements) => insert_section!(element, elements),
+                Section::Code(_, code) => insert_section!(code, code),
+                Section::Data(_, data) => insert_section!(data, data),
+                Section::DataCount(..) => unreachable!(),
+            }
+        }
+
+        sections.custom = vector_from_vec(custom_sections)?;
+
+        Ok(WasmBinary { version, sections })
     }
 }
 

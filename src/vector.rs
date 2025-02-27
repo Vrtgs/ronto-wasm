@@ -1,4 +1,5 @@
-use crate::frontend::Decode;
+use std::cmp::Ordering;
+use crate::parser::Decode;
 use crate::read_tape::ReadTape;
 use std::error::Error;
 use std::fmt;
@@ -8,7 +9,8 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
 pub struct Index(pub u32);
 
 impl Decode for Index {
@@ -39,7 +41,8 @@ const _: () = assert!(
 );
 
 impl Index {
-    pub const ZERO: Self = Self::from_usize(0);
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self  = Self(u32::MAX);
 
     pub const fn try_from_usize(index: usize) -> Option<Index> {
         if index >= u32::MAX as usize {
@@ -47,6 +50,13 @@ impl Index {
         }
 
         Some(Index(index as u32))
+    }
+
+    pub const fn checked_add(self, other: Index) -> Option<Index> {
+        match self.0.checked_add(other.0) {
+            Some(x) => Some(Index(x)),
+            None => None
+        }
     }
 
     pub const fn from_usize(index: usize) -> Index {
@@ -67,15 +77,54 @@ pub struct WasmVec<T> {
 unsafe impl<T: Send> Send for WasmVec<T> {}
 unsafe impl<T: Sync> Sync for WasmVec<T> {}
 
+impl<T> Default for WasmVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> WasmVec<T> {
+    pub const fn new() -> Self {
+        Self {
+            ptr: NonNull::dangling(),
+            len: Index::ZERO
+        }
+    }
+    
     pub fn from_trusted_box(bx: Box<[T]>) -> Self {
         unwrap_index_error!(Self::try_from(bx).ok())
     }
 
-    pub fn map<U>(self, map: impl FnMut(T) -> U) -> WasmVec<U> {
-        WasmVec::from_trusted_box(Box::<[T]>::from(self).into_iter().map(map).collect())
+    pub fn len_idx(&self) -> Index {
+        self.len
+    }
+    
+    pub fn get(&self, index: Index) -> Option<&T> {
+        if self.len <= index {
+            return None
+        }
+        Some(unsafe { &*self.ptr.as_ptr().add(index.as_usize()) })
     }
 
+    pub fn get_mut(&mut self, index: Index) -> Option<&mut T> {
+        if self.len <= index {
+            return None
+        }
+        Some(unsafe { &mut *self.ptr.as_ptr().add(index.as_usize()) })
+    }
+    
+    pub fn map_ref<U>(&self, map: impl FnMut(&T) -> U) -> WasmVec<U> {
+        WasmVec::from_trusted_box(self.iter().map(map).collect())
+    }
+    
+    pub fn map<U>(self, map: impl FnMut(T) -> U) -> WasmVec<U> {
+        WasmVec::from_trusted_box(self.into_iter().map(map).collect())
+    }
+
+    pub fn try_map<U, E>(self, map: impl FnMut(T) -> Result<U, E>) -> Result<WasmVec<U>, E> {
+        self.into_iter().map(map).collect::<Result<Box<[U]>, E>>().map(WasmVec::from_trusted_box)
+    }
+    
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
@@ -97,6 +146,13 @@ impl<T> DerefMut for WasmVec<T> {
         // Safety: self owns this pointer that was previously allocated by Box
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len.as_usize()) }
     }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_out_of_bounds(index: Index, length: Index) -> ! {
+    panic!("index: {} out of bounds for WasmVec of length {}", index.0, length.0)
 }
 
 impl<T: Clone> Clone for WasmVec<T> {
@@ -136,6 +192,15 @@ impl<T> From<WasmVec<T>> for Box<[T]> {
     }
 }
 
+impl<T> IntoIterator for WasmVec<T> {
+    type Item = T;
+    type IntoIter = <Box<[T]> as IntoIterator>::IntoIter;
+    
+    fn into_iter(self) -> Self::IntoIter {
+        Box::<[T]>::from(self).into_iter()
+    }
+}
+
 impl<T> Drop for WasmVec<T> {
     fn drop(&mut self) {
         // Safety: self is currently being dropped, and so it won't be dropped afterward
@@ -157,6 +222,7 @@ macro_rules! deref_trait {
     ($trait: ident $(; fn $name: ident(&self $(, $arg_name: ident : $arg_ty:ty)*) $(-> $ret: ty)?)*) => {
         impl<T: $trait> $trait for WasmVec<T> {
             $(
+            #[allow(clippy::partialeq_ne_impl)]
             fn $name(&self $(, $arg_name : $arg_ty)*) $(-> $ret)? {
                 <[T] as $trait>::$name(&**self $(, $arg_name)*)
             }
@@ -168,3 +234,5 @@ macro_rules! deref_trait {
 deref_trait!(Debug; fn fmt(&self, f: &mut Formatter) -> fmt::Result);
 deref_trait!(PartialEq; fn eq(&self, other: &Self) -> bool; fn ne(&self, other: &Self) -> bool);
 deref_trait!(Eq);
+deref_trait!(PartialOrd; fn partial_cmp(&self, other: &Self) -> Option<Ordering>);
+deref_trait!(Ord; fn cmp(&self, other: &Self) -> Ordering);
