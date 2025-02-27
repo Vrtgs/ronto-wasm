@@ -358,18 +358,29 @@ decodable! {
     #[derive(Debug)]
     enum Section: u8 {
         Custom(CustomSection) = 0x00,
-        Type(Length, TypeSection) = 0x01,
-        Import(Length, ImportSection) = 0x02,
-        Function(Length, FunctionSection) = 0x03,
-        Table(Length, TableSection) = 0x04,
-        Memory(Length, MemorySection) = 0x05,
-        Global(Length, GlobalSection) = 0x06,
-        Export(Length, ExportSection) = 0x07,
-        Start(Length, StartSection) = 0x08,
-        Element(Length, ElementSection) = 0x09,
-        Code(Length, CodeSection) = 0x0a,
-        Data(Length, DataSection) = 0x0b,
-        DataCount(Length, DataCountSection) = 0x0c,
+        Type(WithLength<TypeSection>) = 0x01,
+        Import(WithLength<ImportSection>) = 0x02,
+        Function(WithLength<FunctionSection>) = 0x03,
+        Table(WithLength<TableSection>) = 0x04,
+        Memory(WithLength<MemorySection>) = 0x05,
+        Global(WithLength<GlobalSection>) = 0x06,
+        Export(WithLength<ExportSection>) = 0x07,
+        Start(WithLength<StartSection>) = 0x08,
+        Element(WithLength<ElementSection>) = 0x09,
+        Code(WithLength<CodeSection>) = 0x0a,
+        Data(WithLength<DataSection>) = 0x0b,
+        DataCount(WithLength<DataCountSection>) = 0x0c,
+    }
+}
+
+#[derive(Debug)]
+struct WithLength<T>(T);
+
+impl<T: Decode> Decode for WithLength<T> {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let length = Index::decode(file)?.as_usize();
+        let buffer = file.read(length)?.into_vec();
+        let tape = ReadTape::memory_buffer(buffer);
     }
 }
 
@@ -862,17 +873,17 @@ impl Decode for WasmBinary {
         while file.has_data()? {
             match Section::decode(file)? {
                 Section::Custom(section) => custom_sections.push(section),
-                Section::Type(_, type_shit) => insert_section!(r#type, type_shit),
-                Section::Import(_, imports) => insert_section!(import, imports),
-                Section::Function(_, functions) => insert_section!(function, functions),
-                Section::Table(_, tables) => insert_section!(table, tables),
-                Section::Memory(_, memories) => insert_section!(memory, memories),
-                Section::Global(_, globals) => insert_section!(global, globals),
-                Section::Export(_, exports) => insert_section!(export, exports),
-                Section::Start(_, start) => insert_section!(start, start.0),
-                Section::Element(_, elements) => insert_section!(element, elements),
-                Section::Code(_, code) => insert_section!(code, code),
-                Section::Data(_, data) => insert_section!(data, data),
+                Section::Type(type_shit) => insert_section!(r#type, type_shit.0),
+                Section::Import(imports) => insert_section!(import, imports.0),
+                Section::Function(functions) => insert_section!(function, functions.0),
+                Section::Table(tables) => insert_section!(table, tables.0),
+                Section::Memory(memories) => insert_section!(memory, memories.0),
+                Section::Global(globals) => insert_section!(global, globals.0),
+                Section::Export(exports) => insert_section!(export, exports.0),
+                Section::Start(start) => insert_section!(start, start.0.0),
+                Section::Element(elements) => insert_section!(element, elements.0),
+                Section::Code(code) => insert_section!(code, code.0),
+                Section::Data(data) => insert_section!(data, data.0),
                 Section::DataCount(..) => unreachable!(),
             }
         }
