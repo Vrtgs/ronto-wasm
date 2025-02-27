@@ -13,7 +13,7 @@ mod vector;
 pub use parser::parse_file;
 pub use runtime::execute;
 
-pub trait Stack<T> {
+pub(crate) trait Stack<T> {
     fn pop_n<const N: usize>(&mut self) -> Option<[T; N]>;
 
     fn push_n<const N: usize>(&mut self, data: [T; N]);

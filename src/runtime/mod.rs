@@ -1,6 +1,6 @@
 use crate::instruction::{ExecutionError, Param};
 use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
-use crate::runtime::memory_buffer::MemoryBuffer;
+use crate::runtime::memory_buffer::{MemoryBuffer, OutOfMemory};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
@@ -260,10 +260,31 @@ impl Function {
     }
 }
 
+enum Table {
+    FunctionTable(WasmVec<FunctionIndex>),
+    ExternTable(WasmVec<ExternIndex>),
+}
+
+impl TryFrom<TableValue> for Table {
+    type Error = OutOfMemory;
+
+    fn try_from(value: TableValue) -> Result<Self, Self::Error> {
+        let reserve = value.limits.min.as_usize();
+        Ok(match value.element_type {
+            RefrenceType::FunctionRef => Table::FunctionTable(WasmVec::from_trusted_box(
+                vec![FunctionIndex::NULL; reserve].into()
+            )),
+            RefrenceType::ExternRef => Table::ExternTable(WasmVec::from_trusted_box(
+                vec![ExternIndex::NULL; reserve].into()
+            ))
+        })
+    }
+}
+
 pub struct WasmEnvironment {
     types: WasmVec<TypeInfo>,
     functions: WasmVec<Function>,
-    tables: WasmVec<TableValue>,
+    tables: WasmVec<Table>,
     memory: WasmVec<MemoryBuffer>,
     globals: WasmVec<GlobalValue>,
     data: WasmVec<Data>,
@@ -366,7 +387,7 @@ impl WasmEnvironment {
             functions: WasmVec::from_trusted_box(functions),
             tables: sections
                 .table
-                .map(|tables| tables.tables)
+                .map(|tables| tables.tables.map(|tt| Table::try_from(tt).unwrap()))
                 .unwrap_or_default(),
             memory: sections
                 .memory
