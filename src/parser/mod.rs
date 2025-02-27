@@ -339,9 +339,9 @@ impl Decode for CustomSection {
 
 decodable! {
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    enum RefrenceType: u8 {
-        FunctionRef = 0x70,
-        ExternRef = 0x6F,
+    enum ReferenceType: u8 {
+        Function = 0x70,
+        Extern = 0x6F,
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -354,7 +354,7 @@ decodable! {
     }
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    union ValueType = NumericType | RefrenceType;
+    union ValueType = NumericType | ReferenceType;
 
     #[derive(Debug)]
     enum Section: u8 {
@@ -690,7 +690,7 @@ impl Decode for Limit {
 decodable! {
     #[derive(Debug)]
     struct TableValue {
-        element_type: RefrenceType,
+        element_type: ReferenceType,
         limits: Limit,
     }
 

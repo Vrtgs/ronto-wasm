@@ -1,9 +1,9 @@
 use crate::parser::{
     BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex,
-    MemoryArgument, MemoryIndex, RefrenceType, TableIndex, TagByte, TypeIndex, ValueType,
+    MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType,
 };
 use crate::read_tape::ReadTape;
-use crate::runtime::{MemoryError, MemoryFault, Validator, Value, ValueInner, WasmContext};
+use crate::runtime::{MemoryError, MemoryFault, ReferenceValue, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack};
 use bytemuck::Pod;
@@ -574,19 +574,19 @@ impl InstructionCode<()> for Select {
 
 struct RefNull;
 
-impl InstructionCode<&RefrenceType> for RefNull {
-    fn validate(&self, ref_ty: &RefrenceType, validator: &mut Validator) -> bool {
+impl InstructionCode<&ReferenceType> for RefNull {
+    fn validate(&self, ref_ty: &ReferenceType, validator: &mut Validator) -> bool {
         match ref_ty {
-            RefrenceType::FunctionRef => Function::push_validation_output(validator),
-            RefrenceType::ExternRef => Extern::push_validation_output(validator),
+            ReferenceType::Function => Function::push_validation_output(validator),
+            ReferenceType::Extern => Extern::push_validation_output(validator),
         }
         true
     }
 
-    fn call(&self, ref_ty: &RefrenceType, context: &mut WasmContext) -> ExecutionResult {
+    fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
         match ref_ty {
-            RefrenceType::FunctionRef => context.push(Value::FunctionRef(Function::NULL)),
-            RefrenceType::ExternRef => context.push(Value::ExternRef(Extern::NULL)),
+            ReferenceType::Function => context.push(Value::Ref(ReferenceValue::Function(Function::NULL))),
+            ReferenceType::Extern => context.push(Value::Ref(ReferenceValue::Extern(Extern::NULL))),
         }
         Ok(())
     }
@@ -607,13 +607,15 @@ impl InstructionCode<&Function> for Call {
     }
 }
 
-impl InstructionCode<(&Type, &Table)> for Call {
-    fn validate(&self, _: (&Type, &TableIndex), _: &mut Validator) -> bool {
-        todo!()
-    }
+impl InstructionCode<(&Table, &Type)> for Call {
+    fn validate(&self, _: (&Table, &Type), _: &mut Validator) -> bool { todo!() }
 
-    fn call(&self, _: (&Type, &TableIndex), _: &mut WasmContext) -> ExecutionResult {
-        todo!()
+    fn call(&self, (&table_idx, &type_idx): (&Table, &Type), context: &mut WasmContext) -> ExecutionResult {
+        let idx = Index(u32::pop(context.stack));
+        let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
+            unreachable!();
+        };
+        self.call(&func_idx, context)
     }
 }
 
@@ -1058,10 +1060,10 @@ instruction! {
     ("br_table",       BranchTable) => 0x0e (Labels, Label) code: BranchTable,
     ("return",              Return) => 0x0f code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Unwind(Label::MAX))),
     ("call",                  Call) => 0x10 (Function) code: Call,
-    ("call_indirect", CallIndirect) => 0x11 (Type, Table) code: Call,
+    ("call_indirect", CallIndirect) => 0x11 (Table, Type) code: Call,
 
     // Reference Instructions
-    ("ref.null",      RefNull) => 0xd0 (RefrenceType) code: RefNull,
+    ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
     ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::MAX),
     ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
 

@@ -1,6 +1,6 @@
 use crate::instruction::{ExecutionError, Param};
 use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
-use crate::runtime::memory_buffer::{MemoryBuffer, OutOfMemory};
+use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
@@ -19,14 +19,28 @@ mod memory_buffer;
 pub use memory_buffer::{MemoryError, MemoryFault};
 
 #[derive(Debug, Copy, Clone)]
+pub enum ReferenceValue {
+    Function(FunctionIndex),
+    Extern(ExternIndex),
+}
+
+impl ReferenceValue {
+    pub fn r#type(&self) -> ReferenceType {
+        match self {
+            ReferenceValue::Function(_) => ReferenceType::Function,
+            ReferenceValue::Extern(_) => ReferenceType::Extern,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum Value {
     I32(i32),
     I64(i64),
     F32(f32),
     F64(f64),
     V128(i128),
-    FunctionRef(FunctionIndex),
-    ExternRef(ExternIndex),
+    Ref(ReferenceValue)
 }
 
 impl Value {
@@ -37,10 +51,10 @@ impl Value {
             ValueType::NumericType(NumericType::F32) => Value::F32(0.0),
             ValueType::NumericType(NumericType::F64) => Value::F64(0.0),
             ValueType::NumericType(NumericType::V128) => Value::V128(0),
-            ValueType::RefrenceType(RefrenceType::FunctionRef) => {
-                Value::FunctionRef(FunctionIndex::NULL)
+            ValueType::ReferenceType(ReferenceType::Function) => {
+                Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
             }
-            ValueType::RefrenceType(RefrenceType::ExternRef) => Value::ExternRef(ExternIndex::NULL),
+            ValueType::ReferenceType(ReferenceType::Extern) => Value::Ref(ReferenceValue::Extern(ExternIndex::NULL)),
         }
     }
 
@@ -51,8 +65,7 @@ impl Value {
             Value::F32(_) => ValueType::NumericType(NumericType::F32),
             Value::F64(_) => ValueType::NumericType(NumericType::F64),
             Value::V128(_) => ValueType::NumericType(NumericType::V128),
-            Value::FunctionRef(_) => ValueType::RefrenceType(RefrenceType::FunctionRef),
-            Value::ExternRef(_) => ValueType::RefrenceType(RefrenceType::ExternRef),
+            Value::Ref(reference) => ValueType::ReferenceType(reference.r#type()),
         }
     }
 }
@@ -80,15 +93,15 @@ macro_rules! execute_expr {
     };
 }
 
-macro_rules! impl_value {
-    ($($type_variant:ident $variant: ident => $ty:ty $(; $uty: ty)?),+ $(,)?) => {$(
+macro_rules! impl_numeric_value {
+    ($($variant: ident => $ty:ty $(; $uty: ty)?),+ $(,)?) => {$(
         impl ValueInner for $ty {
             fn into(self) -> Value {
                 Value::$variant(self)
             }
 
             fn r#type() -> ValueType {
-                paste::paste! { ValueType::[<$type_variant Type>]([<$type_variant Type>]::$variant) }
+                ValueType::NumericType(NumericType::$variant)
             }
 
             fn from(data: Value) -> Option<Self> {
@@ -120,7 +133,7 @@ macro_rules! impl_value {
             }
 
             fn r#type() -> ValueType {
-                paste::paste! { ValueType::[<$type_variant Type>]([<$type_variant Type>]::$variant) }
+                <$ty as ValueInner>::r#type()
             }
 
             fn from(data: Value) -> Option<Self> {
@@ -139,19 +152,58 @@ macro_rules! impl_value {
     )+};
 }
 
-impl_value! {
-    Numeric I32  =>  i32; u32,
-    Numeric I64  =>  i64; u64,
-    Numeric F32  =>  f32,
-    Numeric F64  =>  f64,
-    Numeric V128 => i128; u128,
-    Refrence FunctionRef => FunctionIndex,
-    Refrence ExternRef => ExternIndex,
+macro_rules! impl_reference_value {
+    ($($variant:ident => $ty:ty),+ $(,)?) => {$(
+        impl ValueInner for $ty {
+            fn into(self) -> Value {
+                Value::Ref(ReferenceValue::$variant(self))
+            }
+
+            fn r#type() -> ValueType {
+                ValueType::ReferenceType(ReferenceType::$variant)
+            }
+
+            fn from(data: Value) -> Option<Self> {
+                match data {
+                    Value::Ref(ReferenceValue::$variant(inner)) => Some(inner),
+                    _ => None
+                }
+            }
+
+            fn from_ref(data: &Value) -> Option<&Self> {
+                match data {
+                    Value::Ref(ReferenceValue::$variant(inner)) => Some(inner),
+                    _ => None
+                }
+            }
+
+
+            fn from_mut(data: &mut Value) -> Option<&mut Self> {
+                match data {
+                    Value::Ref(ReferenceValue::$variant(inner)) => Some(inner),
+                    _ => None
+                }
+            }
+        }
+    )+};
+}
+
+impl_numeric_value! {
+    I32  =>  i32; u32,
+    I64  =>  i64; u64,
+    F32  =>  f32,
+    F64  =>  f64,
+    V128 => i128; u128,
+}
+
+impl_reference_value! {
+    Function => FunctionIndex,
+    Extern => ExternIndex,
 }
 
 #[derive(Copy, Clone)]
 enum Mut64Type {
-    Ref(RefrenceType),
+    Ref(ReferenceType),
     I32,
     F32,
     I64,
@@ -180,7 +232,7 @@ impl GlobalValue {
             (true, ValueType::NumericType(NumericType::F64)) => {
                 Self::Mutable64(AtomicU64::new(f64::to_bits(0.0)), Mut64Type::F64)
             }
-            (true, ValueType::RefrenceType(ref_ty)) => {
+            (true, ValueType::ReferenceType(ref_ty)) => {
                 Self::Mutable64(AtomicU64::new(u32::MAX as u64), Mut64Type::Ref(ref_ty))
             }
             (true, ValueType::NumericType(NumericType::V128)) => {
