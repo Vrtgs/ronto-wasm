@@ -109,7 +109,7 @@ impl<R: Read> ReadTape<R> {
 }
 
 impl ReadTape<io::Empty> {
-    fn memory_buffer(buff: impl Into<VecDeque<u8>>) -> Self {
+    pub fn memory_buffer(buff: impl Into<VecDeque<u8>>) -> Self {
         Self {
             reader: io::empty(),
             scratch: buff.into(),
