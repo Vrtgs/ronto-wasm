@@ -1,9 +1,9 @@
 use crate::parser::{
     BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex,
-    MemoryArgument, MemoryIndex, RefrenceType, TableIndex, TagByte, TypeIndex, ValueType,
+    MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType,
 };
 use crate::read_tape::ReadTape;
-use crate::runtime::{MemoryError, MemoryFault, Validator, Value, ValueInner, WasmContext};
+use crate::runtime::{MemoryError, MemoryFault, ReferenceValue, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack};
 use bytemuck::Pod;
@@ -575,19 +575,19 @@ impl InstructionCode<()> for Select {
 
 struct RefNull;
 
-impl InstructionCode<&RefrenceType> for RefNull {
-    fn validate(&self, ref_ty: &RefrenceType, validator: &mut Validator) -> bool {
+impl InstructionCode<&ReferenceType> for RefNull {
+    fn validate(&self, ref_ty: &ReferenceType, validator: &mut Validator) -> bool {
         match ref_ty {
-            RefrenceType::FunctionRef => Function::push_validation_output(validator),
-            RefrenceType::ExternRef => Extern::push_validation_output(validator),
+            ReferenceType::Function => Function::push_validation_output(validator),
+            ReferenceType::Extern => Extern::push_validation_output(validator),
         }
         true
     }
 
-    fn call(&self, ref_ty: &RefrenceType, context: &mut WasmContext) -> ExecutionResult {
+    fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
         match ref_ty {
-            RefrenceType::FunctionRef => context.push(Value::FunctionRef(Function::NULL)),
-            RefrenceType::ExternRef => context.push(Value::ExternRef(Extern::NULL)),
+            ReferenceType::Function => context.push(Value::Ref(ReferenceValue::Function(Function::NULL))),
+            ReferenceType::Extern => context.push(Value::Ref(ReferenceValue::Extern(Extern::NULL))),
         }
         Ok(())
     }
@@ -1068,7 +1068,7 @@ instruction! {
     ("call_indirect", CallIndirect) => 0x11 (Type, Table) code: Call,
 
     // Reference Instructions
-    ("ref.null",      RefNull) => 0xd0 (RefrenceType) code: RefNull,
+    ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
     ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::MAX),
     ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
 
