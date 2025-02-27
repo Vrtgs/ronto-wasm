@@ -181,11 +181,59 @@ impl<R: Read> ReadTape<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use paste::paste;
 
-    #[test]
-    fn decode_i8_properly() {
-        for i in -64..63 {
-            assert_eq!(ReadTape::memory_buffer([(i as u8) & 0x7F]).read_leb128::<i8>().unwrap(), i);
-        }
+    macro_rules! test_leb128 {
+        () => {};
+        ($int:ident $($next:tt)*) => {
+            paste! {
+                proptest! {
+                    #[test]
+                    fn [< decodes_ $int _properly >](value: $int) {
+                        #[allow(unused_comparisons)]
+                        const IS_SIGNED: bool = $int::MIN < 0;
+
+                        let mut tape = {
+                            let mut running = value;
+                            let mut result: Vec<u8> = Vec::new();
+
+                            loop {
+                                let byte = (running as u8) & DATA_BITS;
+                                running >>= 7;
+
+                                let mut is_ending = false;
+
+                                if IS_SIGNED {
+                                    const EXTREMA: [$int; 2] = [0, !0];
+                                    if EXTREMA.contains(&running) {
+                                        let running_sign = running == 0;
+                                        let byte_sign = (byte & SIGN_BIT) == 0;
+                                        is_ending = running_sign == byte_sign;
+                                    }
+                                } else {
+                                    is_ending = running == 0;
+                                };
+
+                                if is_ending {
+                                    result.push(byte);
+                                    break;
+                                }
+
+                                result.push(byte | CONTINUE_BIT);
+                            }
+                            ReadTape::memory_buffer(result)
+                        };
+                        assert_eq!(tape.read_leb128::<$int>().unwrap(), value);
+                    }
+                }
+            }
+            test_leb128! { $($next)* }
+        };
+    }
+
+    test_leb128! {
+        i8 i16 i32 i64 i128
+        u8 u16 u32 u64 u128
     }
 }
