@@ -608,13 +608,15 @@ impl InstructionCode<&Function> for Call {
     }
 }
 
-impl InstructionCode<(&Type, &Table)> for Call {
-    fn validate(&self, _: (&Type, &TableIndex), _: &mut Validator) -> bool {
-        todo!()
-    }
+impl InstructionCode<(&Table, &Type)> for Call {
+    fn validate(&self, _: (&Table, &Type), _: &mut Validator) -> bool { todo!() }
 
-    fn call(&self, _: (&Type, &TableIndex), _: &mut WasmContext) -> ExecutionResult {
-        todo!()
+    fn call(&self, (&table_idx, &type_idx): (&Table, &Type), context: &mut WasmContext) -> ExecutionResult {
+        let idx = Index(u32::pop(context.stack));
+        let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
+            unreachable!();
+        };
+        self.call(&func_idx, context)
     }
 }
 
@@ -1065,7 +1067,7 @@ instruction! {
     ("br_table",       BranchTable) => 0x0e (Labels, Label) code: BranchTable,
     ("return",              Return) => 0x0f code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Unwind(Label::MAX))),
     ("call",                  Call) => 0x10 (Function) code: Call,
-    ("call_indirect", CallIndirect) => 0x11 (Type, Table) code: Call,
+    ("call_indirect", CallIndirect) => 0x11 (Table, Type) code: Call,
 
     // Reference Instructions
     ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
