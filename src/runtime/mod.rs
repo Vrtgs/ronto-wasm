@@ -1,6 +1,6 @@
 use crate::instruction::{ExecutionError, Param};
-use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, RefrenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
-use crate::runtime::memory_buffer::MemoryBuffer;
+use crate::parser::{Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
+use crate::runtime::memory_buffer::{MemoryBuffer, OutOfMemory};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
@@ -40,7 +40,7 @@ pub enum Value {
     F32(f32),
     F64(f64),
     V128(i128),
-    Ref(ReferenceValue)
+    Ref(ReferenceValue),
 }
 
 impl Value {
@@ -257,12 +257,12 @@ impl GlobalValue {
                     (Value::F32(bits), Mut64Type::F32) => *loc = bits.to_bits() as u64,
                     (Value::I32(bits), Mut64Type::I32) => *loc = bits as u32 as u64,
                     (
-                        Value::ExternRef(ExternIndex(index)),
-                        Mut64Type::Ref(RefrenceType::ExternRef),
+                        Value::Ref(ReferenceValue::Extern(ExternIndex(index))),
+                        Mut64Type::Ref(ReferenceType::Extern),
                     )
                     | (
-                        Value::FunctionRef(FunctionIndex(index)),
-                        Mut64Type::Ref(RefrenceType::FunctionRef),
+                        Value::Ref(ReferenceValue::Function(FunctionIndex(index))),
+                        Mut64Type::Ref(ReferenceType::Function),
                     ) => *loc = index.0 as u64,
                     _ => return Err(()),
                 }
@@ -276,6 +276,38 @@ impl GlobalValue {
         }
 
         Ok(())
+    }
+
+    fn store(&self, value: Value) -> Result<(), ()> {
+        match *self {
+            GlobalValue::Immutable(_) => Err(()),
+            GlobalValue::Mutable64(ref loc, ty) => {
+                let ord = Ordering::Release;
+                match (value, ty) {
+                    (Value::I64(bits), Mut64Type::I64) => loc.store(bits as u64, ord),
+                    (Value::F64(bits), Mut64Type::F64) => loc.store(bits.to_bits(), ord),
+                    (Value::F32(bits), Mut64Type::F32) => loc.store(bits.to_bits() as u64, ord),
+                    (Value::I32(bits), Mut64Type::I32) => loc.store(bits as u32 as u64, ord),
+                    (
+                        Value::Ref(ReferenceValue::Extern(ExternIndex(index))),
+                        Mut64Type::Ref(ReferenceType::Extern),
+                    )
+                    | (
+                        Value::Ref(ReferenceValue::Function(FunctionIndex(index))),
+                        Mut64Type::Ref(ReferenceType::Function),
+                    ) => loc.store(index.0 as u64, ord),
+                    _ => return Err(()),
+                }
+                Ok(())
+            }
+            GlobalValue::Mutable128(ref loc) => {
+                let Value::V128(val_128) = value else {
+                    return Err(());
+                };
+                loc.store(val_128);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -323,10 +355,10 @@ impl TryFrom<TableValue> for Table {
     fn try_from(value: TableValue) -> Result<Self, Self::Error> {
         let reserve = value.limits.min.as_usize();
         Ok(match value.element_type {
-            RefrenceType::FunctionRef => Table::FunctionTable(WasmVec::from_trusted_box(
+            ReferenceType::Function => Table::FunctionTable(WasmVec::from_trusted_box(
                 vec![FunctionIndex::NULL; reserve].into()
             )),
-            RefrenceType::ExternRef => Table::ExternTable(WasmVec::from_trusted_box(
+            ReferenceType::Extern => Table::ExternTable(WasmVec::from_trusted_box(
                 vec![ExternIndex::NULL; reserve].into()
             ))
         })
@@ -735,7 +767,7 @@ impl<'a> Validator<'a> {
                 },
                 GlobalValue::Mutable64(_, ty) => {
                     let value_type = match ty {
-                        Mut64Type::Ref(ref_ty) => ValueType::RefrenceType(ref_ty),
+                        Mut64Type::Ref(ref_ty) => ValueType::ReferenceType(ref_ty),
                         Mut64Type::I32 => NumericType::I32.into(),
                         Mut64Type::F32 => NumericType::F32.into(),
                         Mut64Type::I64 => NumericType::I64.into(),
@@ -875,10 +907,10 @@ impl WasmContext<'_> {
                         Mut64Type::F32 => Value::F32(f32::from_bits(bits as u32)),
                         Mut64Type::Ref(ref_ty) => {
                             let idx = Index(bits as u32);
-                            match ref_ty {
-                                RefrenceType::FunctionRef => Value::FunctionRef(FunctionIndex(idx)),
-                                RefrenceType::ExternRef => Value::ExternRef(ExternIndex(idx)),
-                            }
+                            Value::Ref(match ref_ty {
+                                ReferenceType::Function => ReferenceValue::Function(FunctionIndex(idx)),
+                                ReferenceType::Extern => ReferenceValue::Extern(ExternIndex(idx)),
+                            })
                         }
                     }
                 }
@@ -891,35 +923,7 @@ impl WasmContext<'_> {
             .globals
             .get(local.0)
             .ok_or(())
-            .and_then(|glob| match *glob {
-                GlobalValue::Immutable(_) => Err(()),
-                GlobalValue::Mutable64(ref loc, ty) => {
-                    let ord = Ordering::Release;
-                    match (value, ty) {
-                        (Value::I64(bits), Mut64Type::I64) => loc.store(bits as u64, ord),
-                        (Value::F64(bits), Mut64Type::F64) => loc.store(bits.to_bits(), ord),
-                        (Value::F32(bits), Mut64Type::F32) => loc.store(bits.to_bits() as u64, ord),
-                        (Value::I32(bits), Mut64Type::I32) => loc.store(bits as u32 as u64, ord),
-                        (
-                            Value::ExternRef(ExternIndex(index)),
-                            Mut64Type::Ref(RefrenceType::ExternRef),
-                        )
-                        | (
-                            Value::FunctionRef(FunctionIndex(index)),
-                            Mut64Type::Ref(RefrenceType::FunctionRef),
-                        ) => loc.store(index.0 as u64, ord),
-                        _ => return Err(()),
-                    }
-                    Ok(())
-                }
-                GlobalValue::Mutable128(ref loc) => {
-                    let Value::V128(val_128) = value else {
-                        return Err(());
-                    };
-                    loc.store(val_128);
-                    Ok(())
-                }
-            })
+            .and_then(|glob| glob.store(value))
     }
 
     pub(crate) fn peek(&self) -> Option<&Value> {
