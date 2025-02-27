@@ -312,7 +312,7 @@ impl WasmEnvironment {
                 .map(|sec| {
                     sec.exports
                         .into_iter()
-                        .map(|export| (export.name.into_boxed_str(), export.description))
+                        .map(|export| (export.name, export.description))
                         .collect()
                 })
                 .unwrap_or_default(),

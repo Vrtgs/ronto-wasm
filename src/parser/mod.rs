@@ -386,7 +386,6 @@ impl<T: Decode> Decode for WithLength<T> {
         if tape.has_data()? { 
             return Err(invalid_data(format!("`{}` has more data than was decoded", type_name::<T>())))
         }
-        
         Ok(Self(ret))
     }
 }
@@ -416,18 +415,20 @@ decodable! {
     }
 }
 
-impl Decode for String {
+impl Decode for Box<str> {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let len = Index::decode(file)?;
-        String::from_utf8(file.read(len.as_usize())?.into()).map_err(invalid_data)
+        String::from_utf8(file.read(len.as_usize())?.into())
+            .map(String::into_boxed_str)
+            .map_err(invalid_data)
     }
 }
 
 decodable! {
     #[derive(Debug)]
     struct Import {
-        module: String,
-        name: String,
+        module: Box<str>,
+        name: Box<str>,
         description: InterfaceDescription,
     }
 
@@ -446,7 +447,7 @@ decodable! {
 
     #[derive(Debug)]
     struct Export {
-        name: String,
+        name: Box<str>,
         description: InterfaceDescription,
     }
 
