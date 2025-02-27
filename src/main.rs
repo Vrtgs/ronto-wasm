@@ -1,22 +1,23 @@
 #![recursion_limit = "1024"]
+#![allow(warnings)]
 
-use std::error::Error;
 use clap::Parser;
+use std::error::Error;
 use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
 
+mod instruction;
 mod parser;
 mod read_tape;
-mod instruction;
 mod runtime;
 mod vector;
 
 pub trait Stack<T> {
     fn pop_n<const N: usize>(&mut self) -> Option<[T; N]>;
-    
+
     fn push_n<const N: usize>(&mut self, data: [T; N]);
 }
 
@@ -58,7 +59,7 @@ pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::
 fn main() -> io::Result<()> {
     let args = Cli::parse();
     let reader = BufReader::new(File::open(args.file)?);
-    
+
     let wasm = parser::parse_file(reader)?;
     runtime::execute(wasm);
     Ok(())

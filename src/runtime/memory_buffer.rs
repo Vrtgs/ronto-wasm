@@ -1,12 +1,11 @@
-use std::cell::RefCell;
-use std::fmt::Formatter;
-use bytemuck::Pod;
 use crate::parser;
 use crate::parser::Limit;
 use crate::vector::Index;
+use bytemuck::Pod;
+use std::cell::RefCell;
+use std::fmt::Formatter;
 
 const PAGE_SIZE: u32 = 65536;
-
 
 macro_rules! make_memory_error {
     ($($name: ident($error:literal);)+) => {$(
@@ -15,13 +14,13 @@ macro_rules! make_memory_error {
         pub struct $name {
             _priv: ()
         }
-        
+
         impl std::fmt::Debug for $name {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
                 f.debug_tuple(stringify!($name)).field(&$error).finish()
             }
         }
-        
+
         impl $name {
             #[cold]
             pub fn new() -> Self {
@@ -37,7 +36,6 @@ make_memory_error! {
     OutOfMemory("OOM emitted, ran out of memory during execution");
     MemoryFault("invalid memory operation");
 }
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
@@ -64,13 +62,13 @@ impl MemoryArgument for parser::MemoryArgument {
 
 pub struct MemoryBuffer {
     limit: Limit,
-    buffer: RefCell<Vec<u8>>
+    buffer: RefCell<Vec<u8>>,
 }
 
 macro_rules! assign_or {
     ($name: ident = $expr:expr; $fail:expr) => {
         let Some($name) = $expr else {
-            return Err($fail)
+            return Err($fail);
         };
     };
 }
@@ -102,28 +100,32 @@ impl MemoryBuffer {
     pub fn new(limit: Limit) -> Result<Self, OutOfMemory> {
         let this = Self {
             limit,
-            buffer: RefCell::new(Vec::new())
+            buffer: RefCell::new(Vec::new()),
         };
         if limit.min != Index::ZERO {
             this.grow(limit.min)?;
         }
         Ok(this)
     }
-    
+
     pub fn size(&self) -> Index {
         Index::from_usize(self.buffer.borrow().len())
     }
-    
+
     pub fn grow(&self, additional: Index) -> Result<Index, OutOfMemory> {
         let buffer = &mut *self.buffer.borrow_mut();
 
         assign_or!(additional = additional.0.checked_mul(PAGE_SIZE).map(Index); OutOfMemory::new());
-        
-        if Index::from_usize(buffer.len()).checked_add(additional).is_none_or(|idx| idx > self.limit.max) {
-            return Err(OutOfMemory::new())
+
+        if Index::from_usize(buffer.len())
+            .checked_add(additional)
+            .is_none_or(|idx| idx > self.limit.max)
+        {
+            return Err(OutOfMemory::new());
         }
 
-        buffer.try_reserve_exact(additional.as_usize())
+        buffer
+            .try_reserve_exact(additional.as_usize())
             .map_err(|_| OutOfMemory::new())?;
         let spare_capacity = &mut buffer.spare_capacity_mut()[..additional.as_usize()];
         let additional_len = spare_capacity.len();
@@ -135,18 +137,33 @@ impl MemoryBuffer {
 
         Ok(Index::from_usize(buffer.len()))
     }
-    
-    pub fn load<T: Pod>(&self, memory_argument: impl MemoryArgument, addr: Index) -> Result<T, MemoryFault> {
+
+    pub fn load<T: Pod>(
+        &self,
+        memory_argument: impl MemoryArgument,
+        addr: Index,
+    ) -> Result<T, MemoryFault> {
         access!(&self.buffer, memory_argument, addr, size_of::<T>(); bytemuck::pod_read_unaligned)
     }
 
-    pub fn store<T: Pod>(&self, memory_argument: impl MemoryArgument, addr: Index, value: &T) -> Result<(), MemoryFault> {
+    pub fn store<T: Pod>(
+        &self,
+        memory_argument: impl MemoryArgument,
+        addr: Index,
+        value: &T,
+    ) -> Result<(), MemoryFault> {
         access!(&mut self.buffer, memory_argument, addr, size_of::<T>(); |bytes: &mut [u8]| {
             bytes.copy_from_slice(bytemuck::bytes_of(value))
         })
     }
 
-    pub fn fill(&self, memory_argument: impl MemoryArgument, addr: Index, size: Index, byte: u8) -> Result<(), MemoryFault> {
+    pub fn fill(
+        &self,
+        memory_argument: impl MemoryArgument,
+        addr: Index,
+        size: Index,
+        byte: u8,
+    ) -> Result<(), MemoryFault> {
         access!(&mut self.buffer, memory_argument, addr, size.as_usize(); |bytes: &mut [u8]| {
             // Safety:
             // slices are perfectly valid for reads and writes for |slice| and are always aligned

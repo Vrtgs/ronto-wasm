@@ -1,13 +1,16 @@
-use std::convert::Infallible;
-use crate::parser::{BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, RefrenceType, TableIndex, TagByte, TypeIndex, ValueType};
 use crate::invalid_data;
+use crate::parser::{
+    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex,
+    MemoryArgument, MemoryIndex, RefrenceType, TableIndex, TagByte, TypeIndex, ValueType,
+};
 use crate::read_tape::ReadTape;
-use std::io::{Read, Result};
-use std::marker::PhantomData;
-use std::ops::{BitAnd, BitOr, BitXor, Neg, Add, Sub, Mul, Div, Not};
-use bytemuck::Pod;
 use crate::runtime::{MemoryError, MemoryFault, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
+use bytemuck::Pod;
+use std::convert::Infallible;
+use std::io::{Read, Result};
+use std::marker::PhantomData;
+use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
 
 type Extern = ExternIndex;
 type Function = FunctionIndex;
@@ -165,7 +168,7 @@ macro_rules! instruction {
                     },)+
                 }
             }
-            
+
             pub fn execute(&self, context: &mut WasmContext) -> ExecutionResult {
                 #[allow(non_snake_case)]
                 match self {
@@ -210,7 +213,7 @@ unsafe fn transmute_any<Src: Copy, Dst: Copy>(src: Src) -> Dst {
 
 pub enum ExecutionError {
     Unwind(Label),
-    Trap
+    Trap,
 }
 
 impl From<MemoryFault> for ExecutionError {
@@ -221,29 +224,34 @@ impl From<MemoryFault> for ExecutionError {
 
 pub type ExecutionResult<T = ()> = std::result::Result<T, ExecutionError>;
 
-
 struct Primitive<Data, In, Out, F> {
     f: F,
-    data: PhantomData<fn(Data, In, &mut WasmContext) -> Out>
+    data: PhantomData<fn(Data, In, &mut WasmContext) -> Out>,
 }
 
 impl<Data, In, Out, F: Fn(Data, In) -> Out> Primitive<Data, In, Out, F> {
-    pub const fn ok(f: F) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
+    pub const fn ok(
+        f: F,
+    ) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
         Primitive::new(move |data, input| Ok(f(data, input)))
     }
 }
 
 impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In, Out, F> {
-    pub const fn new(f: F) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
+    pub const fn new(
+        f: F,
+    ) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
         Primitive::full(move |data, input, _| f(data, input))
     }
 }
 
-impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> Primitive<Data, In, Out, F> {
+impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
+    Primitive<Data, In, Out, F>
+{
     pub const fn full(f: F) -> Self {
         Self {
             f,
-            data: PhantomData
+            data: PhantomData,
         }
     }
 }
@@ -283,7 +291,9 @@ macro_rules! impl_param_for_tuple {
 }
 
 impl Param for () {
-    fn pop_validation_input(_: &mut Validator) -> bool { true }
+    fn pop_validation_input(_: &mut Validator) -> bool {
+        true
+    }
     fn push_validation_output(_: &mut Validator) {}
     fn pop(_: &mut WasmContext) -> Self {}
     fn push(self, _: &mut WasmContext) {}
@@ -298,7 +308,9 @@ impl Param for Infallible {
         validator.set_unreachable()
     }
 
-    fn pop(_: &mut WasmContext) -> Self { unreachable!() }
+    fn pop(_: &mut WasmContext) -> Self {
+        unreachable!()
+    }
     fn push(self, _: &mut WasmContext) {
         match self {}
     }
@@ -338,7 +350,9 @@ pub trait InstructionCode<Data> {
     fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult;
 }
 
-impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> InstructionCode<Data> for Primitive<Data, In, Out, F> {
+impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
+    InstructionCode<Data> for Primitive<Data, In, Out, F>
+{
     fn validate(&self, _: Data, validator: &mut Validator) -> bool {
         let res = In::pop_validation_input(validator);
         if res {
@@ -347,19 +361,19 @@ impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> Execution
         res
     }
 
-    fn call(&self, data: Data, context: &mut WasmContext<>) -> ExecutionResult {
+    fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult {
         let input = In::pop(context);
         (self.f)(data, input, context).map(|x| Out::push(x, context))
     }
 }
-
 
 macro_rules! flag {
     ($name: ident { $flag_name: ident }; true = $truthy: ident; false = $falsy: ident) => {
         trait $name {
             const $flag_name: bool;
         }
-        struct $truthy; struct $falsy;
+        struct $truthy;
+        struct $falsy;
         impl $name for $truthy {
             const $flag_name: bool = true;
         }
@@ -372,18 +386,22 @@ macro_rules! flag {
 
 flag!(BlockBranchBehavior { LOOP_BACK }; true = Loop; false = Break);
 
-
 struct Block<T>(PhantomData<T>);
 
-
 impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Block<T> {
-    fn validate(&self, (r#type, expr): (&BlockType, &Expression), validator:  &mut Validator) -> bool {
+    fn validate(
+        &self,
+        (r#type, expr): (&BlockType, &Expression),
+        validator: &mut Validator,
+    ) -> bool {
         // TODO: validate blocks
         let (input, out) = match *r#type {
             BlockType::Empty => (&[][..], &[][..]),
             BlockType::Type(ref out) => (&[][..], std::slice::from_ref(out)),
             BlockType::TypeIndex(ty) => {
-                let (Some(r#in), Some(out)) = (validator.get_type_input(ty), validator.get_type_output(ty)) else {
+                let (Some(r#in), Some(out)) =
+                    (validator.get_type_input(ty), validator.get_type_output(ty))
+                else {
                     return false;
                 };
                 (r#in, out)
@@ -391,40 +409,50 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
         };
 
         let ends_with = |validator: &mut Validator, needle: &[ValueType]| {
-            if needle.is_empty() { return true }
-            validator.stack().iter().rev().take(needle.len()).copied().eq(needle.iter().copied())
+            if needle.is_empty() {
+                return true;
+            }
+            validator
+                .stack()
+                .iter()
+                .rev()
+                .take(needle.len())
+                .copied()
+                .eq(needle.iter().copied())
         };
 
-
         ends_with(validator, input)
-            && expr.instructions.iter().all(|inst| inst.validate(validator))
+            && expr
+                .instructions
+                .iter()
+                .all(|inst| inst.validate(validator))
             && ends_with(validator, out)
     }
 
-    fn call(&self, (_, expr): (&BlockType, &Expression), context: &mut WasmContext) -> ExecutionResult {
-        'block:
-        loop {
+    fn call(
+        &self,
+        (_, expr): (&BlockType, &Expression),
+        context: &mut WasmContext,
+    ) -> ExecutionResult {
+        'block: loop {
             for instruction in expr.instructions.iter() {
                 match instruction.execute(context) {
                     Ok(()) => (),
                     Err(ExecutionError::Trap) => return Err(ExecutionError::Trap),
-                    Err(ExecutionError::Unwind(LabelIndex(Index(0)))) => {
-                        match T::LOOP_BACK {
-                            true => continue 'block,
-                            false => break 'block Ok(())
-                        }
-                    }
+                    Err(ExecutionError::Unwind(LabelIndex(Index(0)))) => match T::LOOP_BACK {
+                        true => continue 'block,
+                        false => break 'block Ok(()),
+                    },
                     Err(ExecutionError::Unwind(LabelIndex(Index(up @ 1..)))) => {
-                        return Err(ExecutionError::Unwind(LabelIndex(Index(up - 1))))
+                        return Err(ExecutionError::Unwind(LabelIndex(Index(up - 1))));
                     }
                 }
             }
 
-            return Ok(())
+            return Ok(());
         }
     }
 }
-
 
 flag!(BranchBehavior { CONDITIONAL }; true = Conditional; false = Unconditional);
 
@@ -439,7 +467,7 @@ impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
 
     fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
         if T::CONDITIONAL && i32::pop(context) == 0 {
-            return Ok(())
+            return Ok(());
         }
 
         Err(ExecutionError::Unwind(label))
@@ -453,11 +481,15 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         fallback.0 < labels.len_idx() && i32::pop_validation_input(validator)
     }
 
-    fn call(&self, (labels, fallback): (&Labels, &Label), context: &mut WasmContext) -> ExecutionResult {
+    fn call(
+        &self,
+        (labels, fallback): (&Labels, &Label),
+        context: &mut WasmContext,
+    ) -> ExecutionResult {
         let idx = Index(u32::pop(context));
         Err(ExecutionError::Unwind(match labels.get(idx) {
             Some(&label) => label,
-            None => *labels.get(fallback.0).unwrap()
+            None => *labels.get(fallback.0).unwrap(),
         }))
     }
 }
@@ -469,7 +501,7 @@ impl InstructionCode<()> for Drop {
     }
 
     fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
-        let _ =context.pop().unwrap();
+        let _ = context.pop().unwrap();
         Ok(())
     }
 }
@@ -477,15 +509,14 @@ impl InstructionCode<()> for Drop {
 struct Select;
 impl InstructionCode<()> for Select {
     fn validate(&self, (): (), validator: &mut Validator) -> bool {
-        i32::pop_validation_input(validator)
-            && validator.pop_n().is_some_and(|[a, b]| a == b)
+        i32::pop_validation_input(validator) && validator.pop_n().is_some_and(|[a, b]| a == b)
     }
 
     fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
         let [val2, val1] = context.pop_n().unwrap();
         let value = match i32::pop(context) {
             0 => val2,
-            _ => val1
+            _ => val1,
         };
         context.push(value);
         Ok(())
@@ -498,7 +529,7 @@ impl InstructionCode<&RefrenceType> for RefNull {
     fn validate(&self, ref_ty: &RefrenceType, validator: &mut Validator) -> bool {
         match ref_ty {
             RefrenceType::FunctionRef => Function::push_validation_output(validator),
-            RefrenceType::ExternRef => Extern::push_validation_output(validator)
+            RefrenceType::ExternRef => Extern::push_validation_output(validator),
         }
         true
     }
@@ -512,7 +543,6 @@ impl InstructionCode<&RefrenceType> for RefNull {
     }
 }
 
-
 struct Call;
 
 impl InstructionCode<&Function> for Call {
@@ -523,7 +553,7 @@ impl InstructionCode<&Function> for Call {
     fn call(&self, func: &Function, context: &mut WasmContext) -> ExecutionResult {
         match context.call(*func) {
             Ok(()) => Ok(()),
-            Err(()) => Err(ExecutionError::Trap)
+            Err(()) => Err(ExecutionError::Trap),
         }
     }
 }
@@ -537,7 +567,6 @@ impl InstructionCode<(&Type, &Table)> for Call {
         todo!()
     }
 }
-
 
 trait VariableIndex: Copy {
     fn exists(self, validator: &mut Validator) -> bool;
@@ -598,24 +627,25 @@ impl VariableIndex for Global {
     }
 }
 
-
 enum AccessType {
     Get = 0,
     Set = 1,
-    Tee = 2
+    Tee = 2,
 }
 
 macro_rules! access_type {
     (@fetch $lit:expr) => {
-        const {match $lit {
-            0 => AccessType::Get,
-            1 => AccessType::Set,
-            2 => AccessType::Tee,
-            _ => unreachable!()
-        }}
+        const {
+            match $lit {
+                0 => AccessType::Get,
+                1 => AccessType::Set,
+                2 => AccessType::Tee,
+                _ => unreachable!(),
+            }
+        }
     };
     ($lit:expr) => {
-        const {$lit as usize}
+        const { $lit as usize }
     };
 }
 
@@ -629,12 +659,10 @@ impl<I: VariableIndex, const A: usize> InstructionCode<&I> for VariableAccess<I,
             let valid_stack = match access_type!(@fetch A) {
                 AccessType::Get => {
                     validator.push(index_ty);
-                    return true
+                    return true;
                 }
                 AccessType::Set => validator.pop().is_some_and(|ty| ty == index_ty),
-                AccessType::Tee => {
-                    validator.peek().is_some_and(|&ty| ty == index_ty)
-                }
+                AccessType::Tee => validator.peek().is_some_and(|&ty| ty == index_ty),
             };
 
             valid_stack && index.mutable(validator)
@@ -648,7 +676,7 @@ impl<I: VariableIndex, const A: usize> InstructionCode<&I> for VariableAccess<I,
             AccessType::Get => {
                 let value = index.load(context);
                 context.push(value);
-            },
+            }
             AccessType::Set => {
                 let value = context.pop().unwrap();
                 index.store(value, context)
@@ -669,15 +697,20 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let res = u32::pop_validation_input(validator);
-                if res { T::push_validation_output(validator) };
+                if res {
+                    T::push_validation_output(validator)
+                };
                 res
-            },
+            }
             AccessType::Set => {
                 T::pop_validation_input(validator) && u32::pop_validation_input(validator)
-            },
+            }
             AccessType::Tee => {
-                let res = T::pop_validation_input(validator) && u32::pop_validation_input(validator);
-                if res { T::push_validation_output(validator) }
+                let res =
+                    T::pop_validation_input(validator) && u32::pop_validation_input(validator);
+                if res {
+                    T::push_validation_output(validator)
+                }
                 res
             }
         }
@@ -687,32 +720,18 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index(u32::pop(context));
-                let value = context.mem_load::<T>(
-                    MemoryIndex::ZERO,
-                    mem_arg,
-                    index
-                )?;
+                let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(value.into());
-            },
+            }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).unwrap();
                 let index = Index(u32::pop(context));
-                context.mem_store::<T>(
-                    MemoryIndex::ZERO,
-                    mem_arg,
-                    index,
-                    &value
-                )?;
+                context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => {
                 let index = Index(u32::pop(context));
                 let value = context.peek().and_then(T::from_ref).unwrap();
-                context.mem_store::<T>(
-                    MemoryIndex::ZERO,
-                    mem_arg,
-                    index,
-                    value
-                )?;
+                context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
             }
         }
         Ok(())
@@ -725,7 +744,6 @@ trait Extend<T: ValueInner>: Pod {
 }
 
 struct CastingMemoryAccess<T, E, const A: usize>(PhantomData<[(T, E); A]>);
-
 
 macro_rules! impl_extend {
     ($(Extend<$ty:ty> for $small:ty)*) => {$(
@@ -753,7 +771,9 @@ macro_rules! impl_extend {
 impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
-impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument> for CastingMemoryAccess<T, E, A> {
+impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
+    for CastingMemoryAccess<T, E, A>
+{
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
         MemoryAccess::<T, A>::validate(&MemoryAccess(PhantomData), mem_arg, validator)
@@ -763,29 +783,19 @@ impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgumen
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index(u32::pop(context));
-                let value = context.mem_load::<E>(
-                    MemoryIndex::ZERO,
-                    mem_arg,
-                    index
-                )?;
+                let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(E::extend(value).into());
-            },
+            }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
                 let index = Index(u32::pop(context));
-                context.mem_store::<E>(
-                    MemoryIndex::ZERO,
-                    mem_arg,
-                    index,
-                    &value
-                )?;
+                context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
-            AccessType::Tee => unreachable!()
+            AccessType::Tee => unreachable!(),
         }
         Ok(())
     }
 }
-
 
 macro_rules! vector_lane {
     (
@@ -899,7 +909,6 @@ macro_rules! in_out {
     };
 }
 
-
 macro_rules! compare {
     ($($in: ident: $ty: ty),+; $expr: expr) => {
         in_out!($($in: $ty),+; {
@@ -927,7 +936,6 @@ macro_rules! cmp {
     };
 }
 
-
 macro_rules! bin_op {
     (wrapping (a: $ty1:ty, b: $ty2:ty); $name:ident) => { in_out!(a: $ty1, b: $ty2; paste::paste!{ <$ty1>::[<wrapping _ $name>](a, b) }) };
     ((a: $ty1:ty, b: $ty2:ty); $name:ident) => { in_out!(a: $ty1, b: $ty2; <$ty1>::$name(a, b)) };
@@ -942,7 +950,7 @@ macro_rules! unop {
 macro_rules! trap_if_zero {
     ($a: ident, $b: ident, $op: expr) => {{
         if $b == 0 {
-            return Err(ExecutionError::Trap)
+            return Err(ExecutionError::Trap);
         }
         $op($a, $b)
     }};

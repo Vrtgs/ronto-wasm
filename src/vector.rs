@@ -1,6 +1,6 @@
-use std::cmp::Ordering;
 use crate::parser::Decode;
 use crate::read_tape::ReadTape;
+use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
@@ -9,7 +9,9 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, bytemuck::Pod, bytemuck::Zeroable,
+)]
 #[repr(transparent)]
 pub struct Index(pub u32);
 
@@ -42,7 +44,7 @@ const _: () = assert!(
 
 impl Index {
     pub const ZERO: Self = Self(0);
-    pub const MAX: Self  = Self(u32::MAX);
+    pub const MAX: Self = Self(u32::MAX);
 
     pub const fn try_from_usize(index: usize) -> Option<Index> {
         if index >= u32::MAX as usize {
@@ -55,7 +57,7 @@ impl Index {
     pub const fn checked_add(self, other: Index) -> Option<Index> {
         match self.0.checked_add(other.0) {
             Some(x) => Some(Index(x)),
-            None => None
+            None => None,
         }
     }
 
@@ -87,10 +89,10 @@ impl<T> WasmVec<T> {
     pub const fn new() -> Self {
         Self {
             ptr: NonNull::dangling(),
-            len: Index::ZERO
+            len: Index::ZERO,
         }
     }
-    
+
     pub fn from_trusted_box(bx: Box<[T]>) -> Self {
         unwrap_index_error!(Self::try_from(bx).ok())
     }
@@ -98,33 +100,36 @@ impl<T> WasmVec<T> {
     pub fn len_idx(&self) -> Index {
         self.len
     }
-    
+
     pub fn get(&self, index: Index) -> Option<&T> {
         if self.len <= index {
-            return None
+            return None;
         }
         Some(unsafe { &*self.ptr.as_ptr().add(index.as_usize()) })
     }
 
     pub fn get_mut(&mut self, index: Index) -> Option<&mut T> {
         if self.len <= index {
-            return None
+            return None;
         }
         Some(unsafe { &mut *self.ptr.as_ptr().add(index.as_usize()) })
     }
-    
+
     pub fn map_ref<U>(&self, map: impl FnMut(&T) -> U) -> WasmVec<U> {
         WasmVec::from_trusted_box(self.iter().map(map).collect())
     }
-    
+
     pub fn map<U>(self, map: impl FnMut(T) -> U) -> WasmVec<U> {
         WasmVec::from_trusted_box(self.into_iter().map(map).collect())
     }
 
     pub fn try_map<U, E>(self, map: impl FnMut(T) -> Result<U, E>) -> Result<WasmVec<U>, E> {
-        self.into_iter().map(map).collect::<Result<Box<[U]>, E>>().map(WasmVec::from_trusted_box)
+        self.into_iter()
+            .map(map)
+            .collect::<Result<Box<[U]>, E>>()
+            .map(WasmVec::from_trusted_box)
     }
-    
+
     /// # Safety
     /// must ensure the vec isn't dropped afterward
     unsafe fn take_box(&mut self) -> Box<[T]> {
@@ -152,7 +157,10 @@ impl<T> DerefMut for WasmVec<T> {
 #[inline(never)]
 #[track_caller]
 fn panic_out_of_bounds(index: Index, length: Index) -> ! {
-    panic!("index: {} out of bounds for WasmVec of length {}", index.0, length.0)
+    panic!(
+        "index: {} out of bounds for WasmVec of length {}",
+        index.0, length.0
+    )
 }
 
 impl<T: Clone> Clone for WasmVec<T> {
@@ -195,7 +203,7 @@ impl<T> From<WasmVec<T>> for Box<[T]> {
 impl<T> IntoIterator for WasmVec<T> {
     type Item = T;
     type IntoIter = <Box<[T]> as IntoIterator>::IntoIter;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         Box::<[T]>::from(self).into_iter()
     }

@@ -87,9 +87,9 @@ impl<T: Decode> Decode for PhantomData<T> {
 trait Enum: Sized {
     type Discriminant: Decode + Debug + Display + Copy + Clone + 'static;
     const VARIANTS: &'static [Self::Discriminant];
-    
+
     fn discriminant(&self) -> Self::Discriminant;
-    
+
     fn enum_try_decode(
         variant: Self::Discriminant,
         file: &mut ReadTape<impl Read>,
@@ -110,7 +110,9 @@ impl<E: Enum> Decode for E {
 }
 
 macro_rules! discard {
-    ($type: ty) => { _ };
+    ($type: ty) => {
+        _
+    };
 }
 
 macro_rules! filter_discard {
@@ -122,7 +124,7 @@ macro_rules! filter_discard {
 macro_rules! normalize_struct {
     ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $($vis:vis $field:ident : $type:ty),* }) => {
         $(#[$($meta)*])*
-        $outer_vis struct $name { 
+        $outer_vis struct $name {
             $($vis $field : $type),*
         }
     };
@@ -134,7 +136,7 @@ macro_rules! normalize_struct {
             }
         }
     };
-    
+
     ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis $ident:ident : $type:ty $(, $($next:tt)*)? }) => {
         normalize_struct! {
             $(#[$($meta)*])*
@@ -201,7 +203,7 @@ macro_rules! decodable {
                     $(Self::$rest(x) => <$rest as Enum>::discriminant(x)),*
                 }
             }
-            
+
             #[doc(hidden)]
             #[inline(always)]
             fn enum_try_decode(variant: Self::Discriminant, file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
@@ -209,7 +211,7 @@ macro_rules! decodable {
                     $(.or_else(|| <$rest as Enum>::enum_try_decode(variant, file).map(|res| res.map(Self::$rest))))*
             }
         }
-        
+
         impl From<$first_ty> for $name {
             fn from(value: $first_ty) -> Self {
                 Self::$first_ty(value)
@@ -221,7 +223,7 @@ macro_rules! decodable {
                 Self::$rest(value)
             }
         })*
-        
+
         decodable! { $($next)* }
     };
     {$(#[$($meta:tt)*])* enum $name:ident: $type: ty { $($variant:ident $(($($inner:ty),*))? $({ $($ident:ident: $named_ty:ty),* })? = $value:expr),+ $(,)? } $($next:tt)*} => {
@@ -234,13 +236,13 @@ macro_rules! decodable {
             type Discriminant = $type;
             #[doc(hidden)]
             const VARIANTS: &[$type] = &[$($value),*];
-            
+
             fn discriminant(&self) -> Self::Discriminant {
                 match *self {
                     $(Self::$variant $(($(discard!($inner),)*))? $({ $($ident: _),* })? => $value),*
                 }
             }
-            
+
             #[inline(always)]
             fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
                 match variant {
@@ -291,7 +293,7 @@ macro_rules! decodable {
                 $(
                 let $field = <$type>::decode(file)?;
                 )*
-                
+
                 Ok(filter_discard!($([$field])*))
             }
         }
@@ -449,7 +451,7 @@ decodable! {
     struct CodeSection {
         definitions: WasmVec<FunctionDefinition>,
     }
-    
+
     #[derive(Debug)]
     struct StartSection(FunctionIndex);
 }
@@ -540,7 +542,7 @@ macro_rules! index_ty {
                 #[repr(transparent)]
                 struct [<$ty Index>](Index);
             )+}
-            
+
             $(
                 impl [<$ty Index>] {
                     pub const ZERO: Self = Self(Index::ZERO);
@@ -561,7 +563,7 @@ index_ty! {
     Data
     Local
     Label
-    
+
     Extern
 }
 
@@ -633,7 +635,7 @@ impl Debug for Data {
 #[derive(Debug, Copy, Clone)]
 pub struct Limit {
     pub min: Index,
-    pub max: Index
+    pub max: Index,
 }
 
 impl Decode for Limit {
@@ -642,10 +644,10 @@ impl Decode for Limit {
         let min = Index::decode(file)?;
         let max = match bounded {
             true => Index::decode(file)?,
-            false => Index::MAX
+            false => Index::MAX,
         };
-        if max < min { 
-            return Err(invalid_data("degenerate limit encountered; max < min"))
+        if max < min {
+            return Err(invalid_data("degenerate limit encountered; max < min"));
         }
         Ok(Limit { min, max })
     }
@@ -684,12 +686,12 @@ decodable! {
     struct GlobalSection {
         globals: WasmVec<Global>,
     }
-    
+
     #[derive(Debug)]
     struct DataSection {
         data: WasmVec<Data>,
     }
-    
+
     #[derive(Debug)]
     struct DataCountSection(u32);
 
@@ -840,7 +842,7 @@ impl Decode for WasmBinary {
             element: None,
             code: None,
             data: None,
-            start: None
+            start: None,
         };
 
         macro_rules! insert_section {
