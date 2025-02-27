@@ -3,6 +3,7 @@ use crate::parser::{
     Data, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType,
     ImportDescription, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
     ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
+    WasmSections, WasmVersion,
 };
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::vector::{Index, WasmVec};

@@ -690,7 +690,7 @@ impl Decode for Limit {
 decodable! {
     #[derive(Debug)]
     struct TableValue {
-        element_type: RefrenceType,
+        element_type: ReferenceType,
         limits: Limit,
     }
 
