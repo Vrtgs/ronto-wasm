@@ -131,8 +131,8 @@ pub trait Int: sealed::Sealed {}
 
 impl<T: sealed::Sealed> Int for T {}
 
-const CONTINUE_BIT: u8 = 0b10000000;
-const SIGN_BIT: u8 = 0b010000000;
+const CONTINUE_BIT: u8 = 1u8 << 7;
+const SIGN_BIT: u8 = 1u8 << 6;
 const DATA_BITS: u8 = !CONTINUE_BIT;
 
 macro_rules! impl_int {
@@ -175,5 +175,17 @@ impl_int! {
 impl<R: Read> ReadTape<R> {
     pub fn read_leb128<I: Int>(&mut self) -> io::Result<I> {
         I::read_leb128(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_i8_properly() {
+        for i in -64..63 {
+            assert_eq!(ReadTape::memory_buffer([(i as u8) & 0x7F]).read_leb128::<i8>().unwrap(), i);
+        }
     }
 }

@@ -9,3 +9,6 @@ thiserror = "2.0.11"
 paste = "1.0.15"
 bytemuck = { version = "1.21.0", features = ["extern_crate_alloc", "min_const_generics", "derive", "must_cast"] }
 crossbeam = "0.8.4"
+
+[dev-dependencies]
+proptest = "1.6.0"
