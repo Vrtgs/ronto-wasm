@@ -1,11 +1,11 @@
-use crate::invalid_data;
 use crate::parser::{
-    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex,
+    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex,
     MemoryArgument, MemoryIndex, RefrenceType, TableIndex, TagByte, TypeIndex, ValueType,
 };
 use crate::read_tape::ReadTape;
 use crate::runtime::{MemoryError, MemoryFault, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
+use crate::{invalid_data, Stack};
 use bytemuck::Pod;
 use std::convert::Infallible;
 use std::io::{Read, Result};
@@ -246,7 +246,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    Primitive<Data, In, Out, F>
+Primitive<Data, In, Out, F>
 {
     pub const fn full(f: F) -> Self {
         Self {
@@ -256,11 +256,14 @@ impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
     }
 }
 
-trait Param: 'static {
+pub trait Param: Sized + 'static {
     fn pop_validation_input(validator: &mut Validator) -> bool;
     fn push_validation_output(validator: &mut Validator);
-    fn pop(context: &mut WasmContext) -> Self;
-    fn push(self, context: &mut WasmContext);
+    fn pop_checked(context: &mut Vec<Value>) -> Option<Self>;
+    fn pop(context: &mut Vec<Value>) -> Self {
+        Self::pop_checked(context).expect("invalid validation step")
+    }
+    fn push(self, context: &mut Vec<Value>);
 }
 
 macro_rules! impl_param_for_tuple {
@@ -275,14 +278,14 @@ macro_rules! impl_param_for_tuple {
                 validator.push_n([$([<T $T>]::r#type()),+]);
             }
 
-            fn pop(context: &mut WasmContext) -> Self {
+            fn pop_checked(context: &mut Vec<Value>) -> Option<Self> {
                 let Some([$( [<t $T>] ),+]) = context.pop_n() else {
-                    unreachable!("invalid validation stage; popped off more than there was on the stack")
+                    return None;
                 };
-                ($([<T $T>]::from([<t $T>]).unwrap()),+,)
+                Some(($([<T $T>]::from([<t $T>]).unwrap()),+,))
             }
 
-            fn push(self, context: &mut WasmContext) {
+            fn push(self, context: &mut Vec<Value>) {
                 context.push_n([$(self.$T.into()),+]);
             }
         }
@@ -295,8 +298,11 @@ impl Param for () {
         true
     }
     fn push_validation_output(_: &mut Validator) {}
-    fn pop(_: &mut WasmContext) -> Self {}
-    fn push(self, _: &mut WasmContext) {}
+    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> {
+        Some(())
+    }
+    fn pop(_: &mut Vec<Value>) -> Self {}
+    fn push(self, _: &mut Vec<Value>) {}
 }
 
 impl Param for Infallible {
@@ -308,10 +314,12 @@ impl Param for Infallible {
         validator.set_unreachable()
     }
 
-    fn pop(_: &mut WasmContext) -> Self {
+    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> { unreachable!() }
+    fn pop(_: &mut Vec<Value>) -> Self {
         unreachable!()
     }
-    fn push(self, _: &mut WasmContext) {
+
+    fn push(self, _: &mut Vec<Value>) {
         match self {}
     }
 }
@@ -325,11 +333,11 @@ impl<T: ValueInner> Param for T {
         stack.push(T::r#type())
     }
 
-    fn pop(context: &mut WasmContext) -> Self {
-        context.pop().and_then(T::from).unwrap()
+    fn pop_checked(context: &mut Vec<Value>) -> Option<Self> {
+        context.pop().and_then(T::from)
     }
 
-    fn push(self, context: &mut WasmContext) {
+    fn push(self, context: &mut Vec<Value>) {
         context.push(self.into())
     }
 }
@@ -351,7 +359,7 @@ pub trait InstructionCode<Data> {
 }
 
 impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    InstructionCode<Data> for Primitive<Data, In, Out, F>
+InstructionCode<Data> for Primitive<Data, In, Out, F>
 {
     fn validate(&self, _: Data, validator: &mut Validator) -> bool {
         let res = In::pop_validation_input(validator);
@@ -362,8 +370,8 @@ impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> Execution
     }
 
     fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult {
-        let input = In::pop(context);
-        (self.f)(data, input, context).map(|x| Out::push(x, context))
+        let input = In::pop(context.stack);
+        (self.f)(data, input, context).map(|x| Out::push(x, context.stack))
     }
 }
 
@@ -423,9 +431,9 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
 
         ends_with(validator, input)
             && expr
-                .instructions
-                .iter()
-                .all(|inst| inst.validate(validator))
+            .instructions
+            .iter()
+            .all(|inst| inst.validate(validator))
             && ends_with(validator, out)
     }
 
@@ -456,6 +464,48 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
 
 flag!(BranchBehavior { CONDITIONAL }; true = Conditional; false = Unconditional);
 
+struct IfBlock;
+
+impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
+    fn validate(
+        &self,
+        _: (&BlockType, &IfElseBlock),
+        validator: &mut Validator,
+    ) -> bool {
+        u32::pop_validation_input(validator)
+    }
+
+    fn call(
+        &self,
+        (_, expr): (&BlockType, &IfElseBlock),
+        context: &mut WasmContext,
+    ) -> ExecutionResult {
+        let (if_so, if_not) = match expr {
+            IfElseBlock::If(expr) => (&*expr.instructions, &[][..]),
+            IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions)
+        };
+
+        let instr = match u32::pop(context.stack) {
+            0 => if_not,
+            _ => if_so
+        };
+
+        for instruction in instr {
+            match instruction.execute(context) {
+                Ok(()) => (),
+                Err(ExecutionError::Trap) => return Err(ExecutionError::Trap),
+                Err(ExecutionError::Unwind(LabelIndex(Index(0)))) => break,
+                Err(ExecutionError::Unwind(LabelIndex(Index(up @ 1..)))) => {
+                    return Err(ExecutionError::Unwind(LabelIndex(Index(up - 1))));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+
 struct Branch<T>(PhantomData<T>);
 
 impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
@@ -466,7 +516,7 @@ impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
     }
 
     fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
-        if T::CONDITIONAL && i32::pop(context) == 0 {
+        if T::CONDITIONAL && i32::pop(context.stack) == 0 {
             return Ok(());
         }
 
@@ -486,7 +536,7 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         (labels, fallback): (&Labels, &Label),
         context: &mut WasmContext,
     ) -> ExecutionResult {
-        let idx = Index(u32::pop(context));
+        let idx = Index(u32::pop(context.stack));
         Err(ExecutionError::Unwind(match labels.get(idx) {
             Some(&label) => label,
             None => *labels.get(fallback.0).unwrap(),
@@ -514,7 +564,7 @@ impl InstructionCode<()> for Select {
 
     fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
         let [val2, val1] = context.pop_n().unwrap();
-        let value = match i32::pop(context) {
+        let value = match i32::pop(context.stack) {
             0 => val2,
             _ => val1,
         };
@@ -719,17 +769,17 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::pop(context));
+                let index = Index(u32::pop(context.stack));
                 let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(value.into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).unwrap();
-                let index = Index(u32::pop(context));
+                let index = Index(u32::pop(context.stack));
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => {
-                let index = Index(u32::pop(context));
+                let index = Index(u32::pop(context.stack));
                 let value = context.peek().and_then(T::from_ref).unwrap();
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
             }
@@ -772,7 +822,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-    for CastingMemoryAccess<T, E, A>
+for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
@@ -782,13 +832,13 @@ impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgumen
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::pop(context));
+                let index = Index(u32::pop(context.stack));
                 let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(E::extend(value).into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
-                let index = Index(u32::pop(context));
+                let index = Index(u32::pop(context.stack));
                 context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => unreachable!(),
@@ -1009,6 +1059,7 @@ instruction! {
     ("nop",                    Nop) => 0x01 code: in_out!(; ()),
     ("block",                Block) => 0x02 (BlockType, Expression) code: Block(PhantomData::<Break>),
     ("loop",                  Loop) => 0x03 (BlockType, Expression) code: Block(PhantomData::<Loop >),
+    ("if",                     If)  => 0x04 (BlockType, IfElseBlock) code: IfBlock,
     ("br",                  Branch) => 0x0c (Label) code: Branch(PhantomData::<Unconditional>),
     ("br_if",             BranchIf) => 0x0d (Label) code: Branch(PhantomData::<Conditional>),
     ("br_table",       BranchTable) => 0x0e (Labels, Label) code: BranchTable,
