@@ -485,21 +485,22 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
         context: &mut WasmContext,
     ) -> ExecutionResult {
         let return_address = Index::from_usize(context.stack.len());
-        context.labels.push(StackFrame {
-            return_values: match r#type {
+        let stack_frame = StackFrame {
+            return_amount: match r#type {
                 BlockType::Empty => Index::ZERO,
                 BlockType::Type(_) => Index(if T::LOOP_BACK { 0 } else { 1 }),
                 BlockType::TypeIndex(idx) => {
                     let break_val = match T::LOOP_BACK {
-                        true => context.get_type_output(idx),
-                        false => context.get_type_input(idx)
+                        false => context.get_type_output(idx),
+                        true => context.get_type_input(idx)
                     };
                     Index::from_usize(break_val.unwrap().len())
                 }
             },
             return_address,
-        });
-        'block: loop {
+        };
+        context.stack_frames.push(stack_frame);
+        let res = 'block: loop {
             for instruction in expr.instructions.iter() {
                 match instruction.execute(context) {
                     Ok(()) => (),
@@ -515,7 +516,10 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
             }
 
             return Ok(());
-        }
+        };
+        let my_frame = context.stack_frames.pop();
+        debug_assert!(my_frame.unwrap() == stack_frame);
+        res
     }
 }
 
@@ -553,7 +557,11 @@ impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
     fn validate(&self, &label: &Label, validator: &mut Validator) -> bool {
         let has_label = validator.contains_label(label);
         let contains_condition = !T::CONDITIONAL || i32::validate(validator);
-        has_label && contains_condition
+        let ret = has_label && contains_condition;
+        if !T::CONDITIONAL {
+            validator.set_unreachable()
+        }
+        ret
     }
 
     fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
@@ -561,18 +569,17 @@ impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
             return Ok(());
         }
 
-
         let label_offset = label.0.0;
-        let index = Index(Index::from_usize(context.labels.len()).0 - label_offset - 1);
+        let index = Index(Index::from_usize(context.stack_frames.len()).0 - label_offset - 1);
 
         let return_frame = context
-            .labels
+            .stack_frames
             .drain(index.as_usize()..)
             .next()
             .expect("invalid label passed");
 
         let stack_start = return_frame.return_address.as_usize();
-        let stack_end = Index(Index::from_usize(context.stack.len()).0 - return_frame.return_values.0).as_usize();
+        let stack_end = Index(Index::from_usize(context.stack.len()).0 - return_frame.return_amount.0).as_usize();
 
         context.stack.drain(stack_start..stack_end);
 
@@ -593,10 +600,15 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         context: &mut WasmContext,
     ) -> ExecutionResult {
         let idx = Index(u32::get(context.stack));
-        Err(ExecutionError::Unwind(match labels.get(idx) {
+        let label = match labels.get(idx) {
             Some(&label) => label,
             None => *labels.get(fallback.0).expect("label should be valid"),
-        }))
+        };
+        InstructionCode::call(
+            &Branch(PhantomData::<Unconditional>),
+            &label,
+            context
+        )
     }
 }
 
@@ -1109,7 +1121,7 @@ macro_rules! cast {
 instruction! {
     // Control Instructions
     const ("unreachable",    Unreachable) => 0x00 code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Trap)),
-    const ("nop",                    Nop) => 0x01 code: in_out!(; ()),
+    const ("nop",                    Nop) => 0x01 code: in_out!(nop: (); nop),
     const ("block",                Block) => 0x02 (BlockType, Expression) code: Block(PhantomData::<Break>),
     const ("loop",                  Loop) => 0x03 (BlockType, Expression) code: Block(PhantomData::<Loop >),
     const ("if",                     If)  => 0x04 (BlockType, IfElseBlock) code: IfBlock,
@@ -1120,7 +1132,7 @@ instruction! {
     ("return",              Return) => 0x0f code: Primitive::full(|(), (), cntx| {
         InstructionCode::call(
             &Branch(PhantomData::<Unconditional>),
-            &LabelIndex(Index::from_usize(cntx.labels.len()-1)),
+            &LabelIndex(Index::from_usize(cntx.stack_frames.len()-1)),
             cntx
         )
     }),

@@ -559,7 +559,7 @@ impl WasmVirtualMachine {
                 environment: &this,
                 locals: const { WasmVec::new() },
                 stack: &mut globals_stack,
-                labels: vec![],
+                stack_frames: vec![],
                 call_depth: 0,
             };
 
@@ -671,7 +671,7 @@ impl WasmVirtualMachine {
                     .iter()
                     .map(|ty| {
                         let val = stack.pop().unwrap();
-                        assert_eq!(val.r#type(), *ty);
+                        debug_assert_eq!(val.r#type(), *ty);
                         val
                     });
 
@@ -688,8 +688,8 @@ impl WasmVirtualMachine {
             environment: self,
             locals,
             stack,
-            labels: vec![StackFrame {
-                return_values: Index::from_usize(self.get_type_output(function.r#type).unwrap().len()),
+            stack_frames: vec![StackFrame {
+                return_amount: Index::from_usize(self.get_type_output(function.r#type).unwrap().len()),
                 return_address
             }],
             call_depth,
@@ -931,8 +931,9 @@ impl<'a> Validator<'a> {
     }
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) struct StackFrame {
-    pub(crate) return_values: Index,
+    pub(crate) return_amount: Index,
     pub(crate) return_address: Index,
 }
 
@@ -940,7 +941,7 @@ pub struct WasmContext<'a> {
     pub(crate) environment: &'a WasmVirtualMachine,
     pub(crate) locals: WasmVec<Value>,
     pub(crate) stack: &'a mut Vec<Value>,
-    pub(crate) labels: Vec<StackFrame>,
+    pub(crate) stack_frames: Vec<StackFrame>,
     pub(crate) call_depth: usize,
 }
 
