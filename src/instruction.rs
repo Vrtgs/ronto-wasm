@@ -12,6 +12,7 @@ use std::convert::Infallible;
 use std::io::{Read, Result};
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Extern = ExternIndex;
 type Function = FunctionIndex;
@@ -182,6 +183,8 @@ macro_rules! instruction {
             }
 
             pub fn execute(&self, context: &mut WasmContext) -> ExecutionResult {
+                static FIRST_TRAP: AtomicBool = AtomicBool::new(true);
+
                 #[allow(non_snake_case)]
                 let ret = match self {
                     $(Self::$ident$(($($data),*))? => {
@@ -191,6 +194,10 @@ macro_rules! instruction {
                     },)+
                 };
 
+                if matches!(ret, Err(ExecutionError::Trap)) && FIRST_TRAP.swap(false, Ordering::Relaxed) {
+                    dbg!(self);
+                }
+
                 ret
             }
 
@@ -199,6 +206,7 @@ macro_rules! instruction {
                 if false {
                     #[forbid(unreachable_patterns)]
                     match "" {
+                        "" => (),
                         $($name => (),)+
                         _ => ()
                     }
@@ -225,6 +233,7 @@ unsafe fn transmute_any<Src: Copy, Dst: Copy>(src: Src) -> Dst {
     unsafe { Transmute { from: src }.to }
 }
 
+#[derive(Debug)]
 pub enum ExecutionError {
     Unwind(Label),
     Trap,
@@ -274,8 +283,10 @@ pub trait FunctionInput: Sized + 'static {
     fn validate(validator: &mut Validator) -> bool;
     fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
     fn get(stack: &mut Vec<Value>) -> Self {
-        Self::get_checked(stack)
-            .expect("validation should make sure we never get a value from the stack if it doesn't exist, or has a masimatched type")
+        let prev = format!("{stack:?}");
+        Self::get_checked(stack).unwrap_or_else(|| {
+            panic!("{prev} validation should make sure we never get a value from the stack if it doesn't exist, or has a masimatched type")
+        })
     }
     fn into_input(self) -> Vec<Value>;
     fn subtype(ty: &[ValueType]) -> bool;
@@ -484,23 +495,23 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
         (&r#type, expr): (&BlockType, &Expression),
         context: &mut WasmContext,
     ) -> ExecutionResult {
-        let return_address = Index::from_usize(context.stack.len());
-        let stack_frame = StackFrame {
-            return_amount: match r#type {
-                BlockType::Empty => Index::ZERO,
-                BlockType::Type(_) => Index(if T::LOOP_BACK { 0 } else { 1 }),
-                BlockType::TypeIndex(idx) => {
-                    let break_val = match T::LOOP_BACK {
-                        false => context.get_type_output(idx),
-                        true => context.get_type_input(idx)
-                    };
-                    Index::from_usize(break_val.unwrap().len())
-                }
-            },
-            return_address,
-        };
-        context.stack_frames.push(stack_frame);
-        let res = 'block: loop {
+        'block: loop {
+            let return_address = Index::from_usize(context.stack.len());
+            context.stack_frames.push(StackFrame {
+                return_amount: match r#type {
+                    BlockType::Empty => Index::ZERO,
+                    BlockType::Type(_) => Index(if T::LOOP_BACK { 0 } else { 1 }),
+                    BlockType::TypeIndex(idx) => {
+                        let break_val = match T::LOOP_BACK {
+                            false => context.get_type_output(idx),
+                            true => context.get_type_input(idx)
+                        };
+                        Index::from_usize(break_val.unwrap().len())
+                    }
+                },
+                return_address,
+            });
+
             for instruction in expr.instructions.iter() {
                 match instruction.execute(context) {
                     Ok(()) => (),
@@ -516,10 +527,7 @@ impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Bloc
             }
 
             return Ok(());
-        };
-        let my_frame = context.stack_frames.pop();
-        debug_assert!(my_frame.unwrap() == stack_frame);
-        res
+        }
     }
 }
 
@@ -607,7 +615,7 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         InstructionCode::call(
             &Branch(PhantomData::<Unconditional>),
             &label,
-            context
+            context,
         )
     }
 }
@@ -892,9 +900,7 @@ macro_rules! impl_extend {
 impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
-impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-for CastingMemoryAccess<T, E, A>
-{
+impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument> for CastingMemoryAccess<T, E, A> {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
         MemoryAccess::<T, A>::validate(&MemoryAccess(PhantomData), mem_arg, validator)
@@ -1063,11 +1069,22 @@ macro_rules! unop {
 }
 
 macro_rules! trap_if_zero {
-    ($a: ident, $b: ident, $op: expr) => {{
-        if $b == 0 {
-            return Err(ExecutionError::Trap);
-        }
-        $op($a, $b)
+    (<$ty: ty>::$op:ident) => {{
+        in_out!(a: $ty, b: $ty;  {
+            if b == 0 {
+                return Err(ExecutionError::Trap);
+            }
+            <$ty>::$op(a, b)
+        })
+    }};
+}
+
+macro_rules! modulo_n {
+    (<$ty:ty>::$op: ident) => {{
+        in_out!(a: $ty, b: $ty; {
+            let b = (b & const { (<$ty>::BITS-1) as $ty }) as u32;
+            <$ty>::$op(a, b)
+        })
     }};
 }
 
@@ -1078,15 +1095,15 @@ macro_rules! arithmetic {
     ($ty:ty; add) => { bin_op!(wrapping <$ty>::add) };
     ($ty:ty; sub) => { bin_op!(wrapping <$ty>::sub) };
     ($ty:ty; mul) => { bin_op!(wrapping <$ty>::mul) };
-    ($ty:ty; div) => { in_out!(b: $ty, a: $ty; trap_if_zero!(a, b, <$ty>::wrapping_div)) };
-    ($ty:ty; rem) => { in_out!(b: $ty, a: $ty; trap_if_zero!(a, b, <$ty>::wrapping_rem)) };
+    ($ty:ty; div) => { trap_if_zero!(<$ty>::wrapping_div) };
+    ($ty:ty; rem) => { trap_if_zero!(<$ty>::wrapping_rem) };
     ($ty:ty; neg) => { unop!(<$ty>::wrapping_neg) };
     ($ty:ty; not) => { unop!(<$ty>::not) };
     ($ty:ty; and) => { bin_op!(<$ty>::bitand) };
     ($ty:ty;  or) => { bin_op!(<$ty>::bitor ) };
     ($ty:ty; xor) => { bin_op!(<$ty>::bitxor) };
-    ($ty:ty; shr) => { bin_op!(wrapping (a: $ty, b: u32); shr) };
-    ($ty:ty; shl) => { bin_op!(wrapping (a: $ty, b: u32); shl) };
+    ($ty:ty; shr) => { modulo_n!(<$ty>::wrapping_shr) };
+    ($ty:ty; shl) => { modulo_n!(<$ty>::wrapping_shl) };
     ($ty:ty; rotr) => { bin_op!((a: $ty, b: u32); rotate_right) };
     ($ty:ty; rotl) => { bin_op!((a: $ty, b: u32); rotate_left) };
     (float $ty:ty; abs) => { unop!(<$ty>::abs) };

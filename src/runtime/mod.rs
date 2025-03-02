@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::io::Write;
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
@@ -79,7 +79,7 @@ impl Value {
     }
 }
 
-pub trait ValueInner: Pod + Send + Sync {
+pub trait ValueInner: Pod + Send + Sync + Debug {
     const r#TYPE: ValueType;
 
     fn into(self) -> Value;
@@ -1097,6 +1097,8 @@ pub fn execute(wasm: WasmBinary) {
         (
             ("env", "input_int"),
             Import::function(move |()| -> f64 {
+                use std::io::Write;
+
                 let mut stdout = io::stdout().lock();
                 stdout.write_all(b"Give wasm a number: ").unwrap();
                 stdout.flush().unwrap();
@@ -1109,5 +1111,30 @@ pub fn execute(wasm: WasmBinary) {
 
     let env = WasmVirtualMachine::new(wasm, import_object).unwrap();
     env.start().unwrap()
+    // let mem = env.memory.get(Index::ZERO).unwrap();
+    // let str = io::stdin().lines().next().unwrap().unwrap();
+    //
+    // let str_len = Index::from_usize(str.len());
+    // let str_start = Index(mem.grow(Index(str_len.0.div_ceil(PAGE_SIZE))).unwrap().0 * PAGE_SIZE);
+    // let mem_arg = MemoryArgument { align: Index(1), offset: str_start };
+    //
+    // for (i, byte) in str.bytes().enumerate().map(|(i, byte)| (Index::from_usize(i), byte)) {
+    //     mem.store(mem_arg, i, &byte).unwrap()
+    // }
+    //
+    //
+    // let ptr = env.call_by_name::<(u32, u32), u32>("base_64_encode", (str_start.0, str_len.0)).unwrap();
+    //
+    // let mem_arg = MemoryArgument { align: Index(1), offset: Index(ptr) };
+    // let mut str = String::new();
+    // for i in (0..).map(Index) {
+    //     let byte = mem.load::<u8>(mem_arg, i).unwrap();
+    //     if byte == b'\0' {
+    //         break;
+    //     }
+    //     str.push(byte as char)
+    // }
+    //
+    // println!("{}", str)
 }
 

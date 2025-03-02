@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::fmt::Formatter;
 use std::rc::Rc;
 
-const PAGE_SIZE: u32 = 65536;
+pub const PAGE_SIZE: u32 = 65536;
 
 macro_rules! make_memory_error {
     ($($name: ident($error:literal);)+) => {$(
@@ -61,7 +61,7 @@ impl MemoryArgument for parser::MemoryArgument {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct MemoryBuffer {
     limit: Limit,
     buffer: Rc<RefCell<Vec<u8>>>,
@@ -89,10 +89,6 @@ macro_rules! access {
         assign_or_fault!(end  = addr.as_usize().checked_add($size));
 
         paste::paste! { assign_or_fault!(bytes = buffer.[<get $(_mut $($_mut)?)?>](addr.as_usize()..end));  }
-
-        if ($memory_argument.align() & bytes.as_ptr().addr()) != 0 {
-            return Err(MemoryFault::new());
-        }
 
         Ok(($map)(bytes))
     }};
@@ -124,6 +120,7 @@ impl MemoryBuffer {
 
     pub fn grow(&self, additional: Index) -> Result<Index, OutOfMemory> {
         let buffer = &mut *self.buffer.borrow_mut();
+        let top = Index(Index::from_usize(buffer.len()).0 / PAGE_SIZE);
 
         assign_or!(additional = additional.0.checked_mul(PAGE_SIZE).map(Index); OutOfMemory::new());
 
@@ -145,7 +142,7 @@ impl MemoryBuffer {
             buffer.set_len(buffer.len() + additional_len);
         }
 
-        Ok(Index::from_usize(buffer.len()))
+        Ok(top)
     }
 
     pub fn load<T: Pod>(
