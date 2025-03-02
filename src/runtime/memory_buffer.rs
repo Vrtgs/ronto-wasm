@@ -110,6 +110,14 @@ impl MemoryBuffer {
         Ok(this)
     }
 
+    pub fn min(&self) -> Index {
+        self.limit.min
+    }
+
+    pub fn max(&self) -> Index {
+        self.limit.max
+    }
+
     pub fn size(&self) -> Index {
         Index::from_usize(self.buffer.borrow().len())
     }

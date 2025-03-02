@@ -103,7 +103,7 @@ impl<E: Enum> Decode for E {
         Self::enum_try_decode(variant, file).ok_or_else(|| {
             invalid_data(format!(
                 "invalid {name}: {variant}, expected one of: {expected:?}",
-                name = std::any::type_name::<Self>(),
+                name = type_name::<Self>(),
                 expected = E::VARIANTS
             ))
         })?
@@ -123,28 +123,40 @@ macro_rules! filter_discard {
 }
 
 macro_rules! normalize_struct {
-    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $($vis:vis $field:ident : $type:ty),* }) => {
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident {  }) => {
+        $(#[$($meta)*])*
+        $outer_vis struct $name {}
+    };
+
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $($vis:vis $field:ident : $type:ty),+ $(,)? }) => {
         $(#[$($meta)*])*
         $outer_vis struct $name {
             $($vis $field : $type),*
         }
     };
-    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis _ : $type:ty $(, $($next:tt)*)? }) => {
+
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis _ : $type:ty, $($rest:tt)* }) => {
         normalize_struct! {
             $(#[$($meta)*])*
             $outer_vis struct $name {
-                $($($next)*)?
+                $($rest)*
             }
         }
     };
 
-    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis $ident:ident : $type:ty $(, $($next:tt)*)? }) => {
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $($rest:tt)*, $vis:vis _ : $type:ty }) => {
         normalize_struct! {
             $(#[$($meta)*])*
             $outer_vis struct $name {
-                $($($next)*)?
-                $vis $ident: $type
+                $($rest)*
             }
+        }
+    };
+
+    ($(#[$($meta:tt)*])* $outer_vis:vis struct $name:ident { $vis:vis _ : $type:ty }) => {
+        normalize_struct! {
+            $(#[$($meta)*])*
+            $outer_vis struct $name {}
         }
     };
 }
@@ -320,7 +332,6 @@ macro_rules! decodable {
     };
 }
 
-#[expect(dead_code)]
 pub struct CustomSection(pub WasmVec<u8>);
 
 impl Debug for CustomSection {
@@ -403,7 +414,7 @@ impl<const TAG: u8> Decode for TagByte<TAG> {
 }
 
 decodable! {
-    #[derive(Debug)]
+    #[derive(Debug, Eq, PartialEq)]
     struct TypeInfo {
         _: TagByte<0x60>,
         parameters: WasmVec<ValueType>,

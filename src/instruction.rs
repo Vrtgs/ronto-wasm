@@ -4,11 +4,9 @@ use crate::parser::{
     TypeIndex, ValueType,
 };
 use crate::read_tape::ReadTape;
-use crate::runtime::{
-    MemoryError, MemoryFault, ReferenceValue, Validator, Value, ValueInner, WasmContext,
-};
+use crate::runtime::{MemoryError, MemoryFault, ReferenceValue, StackFrame, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
-use crate::{Stack, invalid_data};
+use crate::{invalid_data, Stack};
 use bytemuck::Pod;
 use std::convert::Infallible;
 use std::io::{Read, Result};
@@ -126,7 +124,7 @@ macro_rules! normalize_match_single {
 
 macro_rules! instruction {
     ($(
-        ($name: literal, $ident: ident) => $opcode: literal $(-> $u32_code: literal)? $(($($data: ident),*))? code: $code:expr
+        $(const $(@$const:tt)?)? ($name: literal, $ident: ident) => $opcode: literal $(-> $u32_code: literal)? $(($($data: ident),*))? code: $code:expr
     ),+ $(,)?) => {
         #[derive(Debug, PartialEq, Clone)]
         #[non_exhaustive]
@@ -161,6 +159,17 @@ macro_rules! instruction {
         }
 
         impl Instruction {
+            pub fn const_available(&self) -> bool {
+                macro_rules! is_const {
+                    (const) => {true};
+                    (     ) => {false};
+                }
+
+                match self {
+                    $(Self::$ident$(($(ty_param_discard!($data)),*))? => is_const!($(const $($const)?)?)),+
+                }
+            }
+
             pub fn validate(&self, validator: &mut Validator) -> bool {
                 #[allow(non_snake_case)]
                 match self {
@@ -174,16 +183,17 @@ macro_rules! instruction {
 
             pub fn execute(&self, context: &mut WasmContext) -> ExecutionResult {
                 #[allow(non_snake_case)]
-                match self {
+                let ret = match self {
                     $(Self::$ident$(($($data),*))? => {
                         let primitive = &const { $code };
                         #[allow(unused_parens)]
                         InstructionCode::<($(($(&$data),*))?)>::call(primitive, ($(($($data),*))?), context)
                     },)+
-                }
+                };
+
+                ret
             }
 
-            #[expect(dead_code)]
             pub fn name(&self) -> &'static str {
                 // Warn on duplicate name
                 if false {
@@ -250,7 +260,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    Primitive<Data, In, Out, F>
+Primitive<Data, In, Out, F>
 {
     pub const fn full(f: F) -> Self {
         Self {
@@ -260,90 +270,150 @@ impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
     }
 }
 
-pub trait Param: Sized + 'static {
-    fn pop_validation_input(validator: &mut Validator) -> bool;
-    fn push_validation_output(validator: &mut Validator);
-    fn pop_checked(context: &mut Vec<Value>) -> Option<Self>;
-    fn pop(context: &mut Vec<Value>) -> Self {
-        Self::pop_checked(context).expect("invalid validation step")
+pub trait FunctionInput: Sized + 'static {
+    fn validate(validator: &mut Validator) -> bool;
+    fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
+    fn get(stack: &mut Vec<Value>) -> Self {
+        Self::get_checked(stack)
+            .expect("validation should make sure we never get a value from the stack if it doesn't exist, or has a masimatched type")
     }
-    fn push(self, context: &mut Vec<Value>);
+    fn into_input(self) -> Vec<Value>;
+    fn subtype(ty: &[ValueType]) -> bool;
 }
 
-macro_rules! impl_param_for_tuple {
-    ($(($($T:literal),+ $(,)?))+) => {paste::paste! {
-        $(
-        impl<$([<T $T>]: ValueInner),*> Param for ($([<T $T>]),+,) {
-            fn pop_validation_input(validator: &mut Validator) -> bool {
-                validator.pop_n().is_some_and(|arr| arr == [ $([<T $T>]::r#type()),*])
-            }
-
-            fn push_validation_output(validator: &mut Validator) {
-                validator.push_n([$([<T $T>]::r#type()),+]);
-            }
-
-            fn pop_checked(context: &mut Vec<Value>) -> Option<Self> {
-                let [$( [<t $T>] ),+] = context.pop_n()?;
-                Some(($([<T $T>]::from([<t $T>]).unwrap()),+,))
-            }
-
-            fn push(self, context: &mut Vec<Value>) {
-                context.push_n([$(self.$T.into()),+]);
-            }
-        }
-        )+
-    }};
+pub trait FunctionOutput: Sized + 'static {
+    fn update_validator(validator: &mut Validator);
+    fn push(self, stack: &mut Vec<Value>);
+    fn get_output(stack: &mut Vec<Value>) -> Option<Self>;
+    fn subtype(ty: &[ValueType]) -> bool;
 }
 
-impl Param for () {
-    fn pop_validation_input(_: &mut Validator) -> bool {
+impl FunctionInput for () {
+    fn validate(_: &mut Validator) -> bool {
         true
     }
-    fn push_validation_output(_: &mut Validator) {}
-    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> {
+
+    fn get_checked(_: &mut Vec<Value>) -> Option<Self> {
         Some(())
     }
-    fn pop(_: &mut Vec<Value>) -> Self {}
-    fn push(self, _: &mut Vec<Value>) {}
+
+    fn get(_: &mut Vec<Value>) -> Self {}
+
+    fn into_input(self) -> Vec<Value> {
+        vec![]
+    }
+
+    fn subtype(ty: &[ValueType]) -> bool {
+        ty.is_empty()
+    }
 }
 
-impl Param for Infallible {
-    fn pop_validation_input(_: &mut Validator) -> bool {
-        unreachable!()
+impl FunctionOutput for () {
+    fn update_validator(_: &mut Validator) {}
+    fn push(self, _: &mut Vec<Value>) {}
+    fn get_output(_: &mut Vec<Value>) -> Option<Self> {
+        Some(())
     }
 
-    fn push_validation_output(validator: &mut Validator) {
+    fn subtype(ty: &[ValueType]) -> bool {
+        ty.is_empty()
+    }
+}
+
+impl FunctionOutput for Infallible {
+    fn update_validator(validator: &mut Validator) {
         validator.set_unreachable()
-    }
-
-    fn pop_checked(_: &mut Vec<Value>) -> Option<Self> {
-        unreachable!()
-    }
-    fn pop(_: &mut Vec<Value>) -> Self {
-        unreachable!()
     }
 
     fn push(self, _: &mut Vec<Value>) {
         match self {}
     }
+
+    fn get_output(_: &mut Vec<Value>) -> Option<Self> {
+        unreachable!()
+    }
+
+    fn subtype(_: &[ValueType]) -> bool {
+        true
+    }
 }
 
-impl<T: ValueInner> Param for T {
-    fn pop_validation_input(stack: &mut Validator) -> bool {
-        stack.pop().is_some_and(|t| t == T::r#type())
+impl<T: ValueInner> FunctionOutput for T {
+    fn update_validator(validator: &mut Validator) {
+        validator.push(T::r#TYPE)
     }
 
-    fn push_validation_output(stack: &mut Validator) {
-        stack.push(T::r#type())
+    fn push(self, stack: &mut Vec<Value>) {
+        stack.push(self.into())
     }
 
-    fn pop_checked(context: &mut Vec<Value>) -> Option<Self> {
+    fn get_output(stack: &mut Vec<Value>) -> Option<Self> {
+        FunctionInput::get_checked(stack)
+    }
+
+    fn subtype(ty: &[ValueType]) -> bool {
+        <T as FunctionInput>::subtype(ty)
+    }
+}
+
+impl<T: ValueInner> FunctionInput for T {
+    fn validate(validator: &mut Validator) -> bool {
+        validator.pop().is_some_and(|t| t == T::r#TYPE)
+    }
+    fn get_checked(context: &mut Vec<Value>) -> Option<Self> {
         context.pop().and_then(T::from)
     }
 
-    fn push(self, context: &mut Vec<Value>) {
-        context.push(self.into())
+    fn into_input(self) -> Vec<Value> {
+        vec![self.into()]
     }
+
+    fn subtype(ty: &[ValueType]) -> bool {
+        ty == [T::r#TYPE]
+    }
+}
+
+macro_rules! impl_param_for_tuple {
+    ($(($($T:literal),+ $(,)?))+) => {paste::paste! {
+        $(
+        impl<$([<T $T>]: ValueInner),*> FunctionOutput for ($([<T $T>]),+,) {
+            fn update_validator(validator: &mut Validator) {
+                validator.push_n([$([<T $T>]::r#TYPE),+]);
+            }
+
+            fn push(self, context: &mut Vec<Value>) {
+                context.push_n([$(self.$T.into()),+]);
+            }
+
+            fn get_output(stack: &mut Vec<Value>) -> Option<Self> {
+                FunctionInput::get_checked(stack)
+            }
+
+            fn subtype(ty: &[ValueType]) -> bool {
+                <Self as FunctionInput>::subtype(ty)
+            }
+        }
+
+        impl<$([<T $T>]: ValueInner),*> FunctionInput for ($([<T $T>]),+,) {
+            fn validate(validator: &mut Validator) -> bool {
+                validator.pop_n().is_some_and(|arr| arr == [ $([<T $T>]::r#TYPE),*])
+            }
+
+            fn get_checked(context: &mut Vec<Value>) -> Option<Self> {
+                let [$( [<t $T>] ),+] = context.pop_n()?;
+                Some(($([<T $T>]::from([<t $T>])?),+,))
+            }
+
+            fn into_input(self) -> Vec<Value> {
+                vec![$(self.$T.into()),+]
+            }
+
+            fn subtype(ty: &[ValueType]) -> bool {
+                ty == [$([<T $T>]::r#TYPE),+]
+            }
+        }
+        )+
+    }};
 }
 
 impl_param_for_tuple! {
@@ -362,19 +432,23 @@ pub trait InstructionCode<Data> {
     fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult;
 }
 
-impl<Data, In: Param, Out: Param, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    InstructionCode<Data> for Primitive<Data, In, Out, F>
+impl<
+    Data,
+    In: FunctionInput,
+    Out: FunctionOutput,
+    F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>,
+> InstructionCode<Data> for Primitive<Data, In, Out, F>
 {
     fn validate(&self, _: Data, validator: &mut Validator) -> bool {
-        let res = In::pop_validation_input(validator);
+        let res = In::validate(validator);
         if res {
-            Out::push_validation_output(validator)
+            Out::update_validator(validator)
         }
         res
     }
 
     fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult {
-        let input = In::pop(context.stack);
+        let input = In::get(context.stack);
         (self.f)(data, input, context).map(|x| Out::push(x, context.stack))
     }
 }
@@ -401,51 +475,30 @@ flag!(BlockBranchBehavior { LOOP_BACK }; true = Loop; false = Break);
 struct Block<T>(PhantomData<T>);
 
 impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Block<T> {
-    fn validate(
-        &self,
-        (r#type, expr): (&BlockType, &Expression),
-        validator: &mut Validator,
-    ) -> bool {
-        // TODO: validate blocks
-        let (input, out) = match *r#type {
-            BlockType::Empty => (&[][..], &[][..]),
-            BlockType::Type(ref out) => (&[][..], std::slice::from_ref(out)),
-            BlockType::TypeIndex(ty) => {
-                let (Some(r#in), Some(out)) =
-                    (validator.get_type_input(ty), validator.get_type_output(ty))
-                else {
-                    return false;
-                };
-                (r#in, out)
-            }
-        };
-
-        let ends_with = |validator: &mut Validator, needle: &[ValueType]| {
-            if needle.is_empty() {
-                return true;
-            }
-            validator
-                .stack()
-                .iter()
-                .rev()
-                .take(needle.len())
-                .copied()
-                .eq(needle.iter().copied())
-        };
-
-        ends_with(validator, input)
-            && expr
-                .instructions
-                .iter()
-                .all(|inst| inst.validate(validator))
-            && ends_with(validator, out)
+    fn validate(&self, _: (&BlockType, &Expression), _: &mut Validator) -> bool {
+        todo!()
     }
 
     fn call(
         &self,
-        (_, expr): (&BlockType, &Expression),
+        (&r#type, expr): (&BlockType, &Expression),
         context: &mut WasmContext,
     ) -> ExecutionResult {
+        let return_address = Index::from_usize(context.stack.len());
+        context.labels.push(StackFrame {
+            return_values: match r#type {
+                BlockType::Empty => Index::ZERO,
+                BlockType::Type(_) => Index(if T::LOOP_BACK { 0 } else { 1 }),
+                BlockType::TypeIndex(idx) => {
+                    let break_val = match T::LOOP_BACK {
+                        true => context.get_type_output(idx),
+                        false => context.get_type_input(idx)
+                    };
+                    Index::from_usize(break_val.unwrap().len())
+                }
+            },
+            return_address,
+        });
         'block: loop {
             for instruction in expr.instructions.iter() {
                 match instruction.execute(context) {
@@ -472,7 +525,7 @@ struct IfBlock;
 
 impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
     fn validate(&self, _: (&BlockType, &IfElseBlock), validator: &mut Validator) -> bool {
-        u32::pop_validation_input(validator)
+        u32::validate(validator)
     }
 
     fn call(
@@ -485,23 +538,12 @@ impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
             IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions),
         };
 
-        let instr = match u32::pop(context.stack) {
+        let instr = match u32::get(context.stack) {
             0 => if_not,
             _ => if_so,
         };
 
-        for instruction in instr {
-            match instruction.execute(context) {
-                Ok(()) => (),
-                Err(ExecutionError::Trap) => return Err(ExecutionError::Trap),
-                Err(ExecutionError::Unwind(LabelIndex(Index(0)))) => break,
-                Err(ExecutionError::Unwind(LabelIndex(Index(up @ 1..)))) => {
-                    return Err(ExecutionError::Unwind(LabelIndex(Index(up - 1))));
-                }
-            }
-        }
-
-        Ok(())
+        instr.iter().try_for_each(|i| i.execute(context))
     }
 }
 
@@ -510,14 +552,29 @@ struct Branch<T>(PhantomData<T>);
 impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
     fn validate(&self, &label: &Label, validator: &mut Validator) -> bool {
         let has_label = validator.contains_label(label);
-        let contains_condition = !T::CONDITIONAL || i32::pop_validation_input(validator);
+        let contains_condition = !T::CONDITIONAL || i32::validate(validator);
         has_label && contains_condition
     }
 
     fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
-        if T::CONDITIONAL && i32::pop(context.stack) == 0 {
+        if T::CONDITIONAL && i32::get(context.stack) == 0 {
             return Ok(());
         }
+
+
+        let label_offset = label.0.0;
+        let index = Index(Index::from_usize(context.labels.len()).0 - label_offset - 1);
+
+        let return_frame = context
+            .labels
+            .drain(index.as_usize()..)
+            .next()
+            .expect("invalid label passed");
+
+        let stack_start = return_frame.return_address.as_usize();
+        let stack_end = Index(Index::from_usize(context.stack.len()).0 - return_frame.return_values.0).as_usize();
+
+        context.stack.drain(stack_start..stack_end);
 
         Err(ExecutionError::Unwind(label))
     }
@@ -527,7 +584,7 @@ struct BranchTable;
 
 impl InstructionCode<(&Labels, &Label)> for BranchTable {
     fn validate(&self, (labels, fallback): (&Labels, &Label), validator: &mut Validator) -> bool {
-        fallback.0 < labels.len_idx() && i32::pop_validation_input(validator)
+        fallback.0 < labels.len_idx() && i32::validate(validator)
     }
 
     fn call(
@@ -535,10 +592,10 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         (labels, fallback): (&Labels, &Label),
         context: &mut WasmContext,
     ) -> ExecutionResult {
-        let idx = Index(u32::pop(context.stack));
+        let idx = Index(u32::get(context.stack));
         Err(ExecutionError::Unwind(match labels.get(idx) {
             Some(&label) => label,
-            None => *labels.get(fallback.0).unwrap(),
+            None => *labels.get(fallback.0).expect("label should be valid"),
         }))
     }
 }
@@ -558,12 +615,12 @@ impl InstructionCode<()> for Drop {
 struct Select;
 impl InstructionCode<()> for Select {
     fn validate(&self, (): (), validator: &mut Validator) -> bool {
-        i32::pop_validation_input(validator) && validator.pop_n().is_some_and(|[a, b]| a == b)
+        i32::validate(validator) && validator.pop_n().is_some_and(|[a, b]| a == b)
     }
 
     fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
         let [val2, val1] = context.pop_n().unwrap();
-        let value = match i32::pop(context.stack) {
+        let value = match i32::get(context.stack) {
             0 => val2,
             _ => val1,
         };
@@ -577,8 +634,8 @@ struct RefNull;
 impl InstructionCode<&ReferenceType> for RefNull {
     fn validate(&self, ref_ty: &ReferenceType, validator: &mut Validator) -> bool {
         match ref_ty {
-            ReferenceType::Function => Function::push_validation_output(validator),
-            ReferenceType::Extern => Extern::push_validation_output(validator),
+            ReferenceType::Function => Function::update_validator(validator),
+            ReferenceType::Extern => Extern::update_validator(validator),
         }
         true
     }
@@ -614,12 +671,8 @@ impl InstructionCode<(&Table, &Type)> for Call {
         todo!()
     }
 
-    fn call(
-        &self,
-        (&table_idx, &type_idx): (&Table, &Type),
-        context: &mut WasmContext,
-    ) -> ExecutionResult {
-        let idx = Index(u32::pop(context.stack));
+    fn call(&self, (&table_idx, _): (&Table, &Type), context: &mut WasmContext) -> ExecutionResult {
+        let idx = Index(u32::get(context.stack));
         let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
             unreachable!();
         };
@@ -755,20 +808,17 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
     fn validate(&self, &_: &MemoryArgument, validator: &mut Validator) -> bool {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let res = u32::pop_validation_input(validator);
+                let res = u32::validate(validator);
                 if res {
-                    T::push_validation_output(validator)
+                    T::update_validator(validator)
                 };
                 res
             }
-            AccessType::Set => {
-                T::pop_validation_input(validator) && u32::pop_validation_input(validator)
-            }
+            AccessType::Set => T::validate(validator) && u32::validate(validator),
             AccessType::Tee => {
-                let res =
-                    T::pop_validation_input(validator) && u32::pop_validation_input(validator);
+                let res = T::validate(validator) && u32::validate(validator);
                 if res {
-                    T::push_validation_output(validator)
+                    T::update_validator(validator)
                 }
                 res
             }
@@ -778,17 +828,17 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::pop(context.stack));
+                let index = Index(u32::get(context.stack));
                 let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(value.into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).unwrap();
-                let index = Index(u32::pop(context.stack));
+                let index = Index(u32::get(context.stack));
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => {
-                let index = Index(u32::pop(context.stack));
+                let index = Index(u32::get(context.stack));
                 let value = context.peek().and_then(T::from_ref).unwrap();
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
             }
@@ -831,7 +881,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-    for CastingMemoryAccess<T, E, A>
+for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
@@ -841,13 +891,13 @@ impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgumen
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::pop(context.stack));
+                let index = Index(u32::get(context.stack));
                 let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(E::extend(value).into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
-                let index = Index(u32::pop(context.stack));
+                let index = Index(u32::get(context.stack));
                 context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => unreachable!(),
@@ -1058,27 +1108,34 @@ macro_rules! cast {
 
 instruction! {
     // Control Instructions
-    ("unreachable",    Unreachable) => 0x00 code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Trap)),
-    ("nop",                    Nop) => 0x01 code: in_out!(; ()),
-    ("block",                Block) => 0x02 (BlockType, Expression) code: Block(PhantomData::<Break>),
-    ("loop",                  Loop) => 0x03 (BlockType, Expression) code: Block(PhantomData::<Loop >),
-    ("if",                     If)  => 0x04 (BlockType, IfElseBlock) code: IfBlock,
-    ("br",                  Branch) => 0x0c (Label) code: Branch(PhantomData::<Unconditional>),
-    ("br_if",             BranchIf) => 0x0d (Label) code: Branch(PhantomData::<Conditional>),
-    ("br_table",       BranchTable) => 0x0e (Labels, Label) code: BranchTable,
-    ("return",              Return) => 0x0f code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Unwind(Label::MAX))),
+    const ("unreachable",    Unreachable) => 0x00 code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Trap)),
+    const ("nop",                    Nop) => 0x01 code: in_out!(; ()),
+    const ("block",                Block) => 0x02 (BlockType, Expression) code: Block(PhantomData::<Break>),
+    const ("loop",                  Loop) => 0x03 (BlockType, Expression) code: Block(PhantomData::<Loop >),
+    const ("if",                     If)  => 0x04 (BlockType, IfElseBlock) code: IfBlock,
+    const ("br",                  Branch) => 0x0c (Label) code: Branch(PhantomData::<Unconditional>),
+    const ("br_if",             BranchIf) => 0x0d (Label) code: Branch(PhantomData::<Conditional>),
+    const ("br_table",       BranchTable) => 0x0e (Labels, Label) code: BranchTable,
+
+    ("return",              Return) => 0x0f code: Primitive::full(|(), (), cntx| {
+        InstructionCode::call(
+            &Branch(PhantomData::<Unconditional>),
+            &LabelIndex(Index::from_usize(cntx.labels.len()-1)),
+            cntx
+        )
+    }),
     ("call",                  Call) => 0x10 (Function) code: Call,
     ("call_indirect", CallIndirect) => 0x11 (Table, Type) code: Call,
 
     // Reference Instructions
-    ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
-    ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::MAX),
+    const ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
+    const ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::NULL),
     ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
 
 
     // // Parametric Instructions
-    ("drop",         Drop) => 0x1a code: Drop,
-    ("select",     Select) => 0x1b code: Select,
+    const ("drop",         Drop) => 0x1a code: Drop,
+    const ("select",     Select) => 0x1b code: Select,
     // ("select_t*", SelectT) => 0x1c (WasmVec<ValueType>),
     //
     // Variable Instructions
@@ -1096,11 +1153,15 @@ instruction! {
     ("f32.load",        F32Load) => 0x2a (MemoryArgument) code: load!(f32),
     ("f64.load",        F64Load) => 0x2b (MemoryArgument) code: load!(f64),
 
-    // Casting load
+    // # Casting load
+
+    // ## i32
     ("i32.load8_s",   I32LoadI8) => 0x2c (MemoryArgument) code: load!(i32 <==  i8),
     ("i32.load8_u",   I32LoadU8) => 0x2d (MemoryArgument) code: load!(i32 <==  u8),
     ("i32.load16_s", I32LoadI16) => 0x2e (MemoryArgument) code: load!(i32 <== i16),
     ("i32.load16_u", I32LoadU16) => 0x2f (MemoryArgument) code: load!(i32 <== i16),
+
+    // ## i64
     ("i64.load8_s",   I64LoadI8) => 0x30 (MemoryArgument) code: load!(i64 <==  i8),
     ("i64.load8_u",   I64LoadU8) => 0x31 (MemoryArgument) code: load!(i64 <==  u8),
     ("i64.load16_s", I64LoadI16) => 0x32 (MemoryArgument) code: load!(i64 <== i16),
@@ -1115,13 +1176,18 @@ instruction! {
     ("f64.store",      F64Store) => 0x39 (MemoryArgument) code: store!(f64),
 
     // Casting store
+
+    // ## i32
     ("i32.store8",   I32StoreI8) => 0x3a (MemoryArgument) code: store!(i32 ==>  i8),
     ("i32.store16", I32StoreI16) => 0x3b (MemoryArgument) code: store!(i32 ==> i16),
+
+
+    // ## i64
     ("i64.store8",   I64StoreI8) => 0x3c (MemoryArgument) code: store!(i64 ==>  i8),
     ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument) code: store!(i64 ==> i16),
     ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument) code: store!(i64 ==> i32),
 
-    ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, (), ctx| {
+    const ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, (), ctx| {
         Ok(ctx.mem_size(MemoryIndex::ZERO)?.0)
     }),
     ("memory.grow",  MemoryGrow) => 0x40 (NullByte) code: Primitive::full(|_, grow_by: u32, ctx| {
@@ -1141,175 +1207,175 @@ instruction! {
     // # Numeric Instructions
 
     // ## Constants
-    ("i32.const", I32Const) => 0x41 (i32) code: immediate!(i32),
-    ("i64.const", I64Const) => 0x42 (i64) code: immediate!(i64),
-    ("f32.const", F32Const) => 0x43 (f32) code: immediate!(f32),
-    ("f64.const", F64Const) => 0x44 (f64) code: immediate!(f64),
+    const ("i32.const", I32Const) => 0x41 (i32) code: immediate!(i32),
+    const ("i64.const", I64Const) => 0x42 (i64) code: immediate!(i64),
+    const ("f32.const", F32Const) => 0x43 (f32) code: immediate!(f32),
+    const ("f64.const", F64Const) => 0x44 (f64) code: immediate!(f64),
 
     // ## Equality
 
     // ### i32
-    ("i32.eqz", I32EqZ) => 0x45 code: eqz!(i32),
-    ("i32.eq",   I32Eq) => 0x46 code: cmp!(i32; ==),
-    ("i32.ne",   I32Ne) => 0x47 code: cmp!(i32; !=),
-    ("i32.lt_s", I32Lt) => 0x48 code: cmp!(i32; <),
-    ("i32.lt_u", U32Lt) => 0x49 code: cmp!(u32; <),
-    ("i32.gt_s", I32Gt) => 0x4a code: cmp!(i32; >),
-    ("i32.gt_u", U32Gt) => 0x4b code: cmp!(u32; >),
-    ("i32.le_s", I32Le) => 0x4c code: cmp!(i32; <=),
-    ("i32.le_u", U32Le) => 0x4d code: cmp!(u32; <=),
-    ("i32.ge_s", I32Ge) => 0x4e code: cmp!(i32; >=),
-    ("i32.ge_u", U32Ge) => 0x4f code: cmp!(u32; >=),
+    const ("i32.eqz", I32EqZ) => 0x45 code: eqz!(i32),
+    const ("i32.eq",   I32Eq) => 0x46 code: cmp!(i32; ==),
+    const ("i32.ne",   I32Ne) => 0x47 code: cmp!(i32; !=),
+    const ("i32.lt_s", I32Lt) => 0x48 code: cmp!(i32; <),
+    const ("i32.lt_u", U32Lt) => 0x49 code: cmp!(u32; <),
+    const ("i32.gt_s", I32Gt) => 0x4a code: cmp!(i32; >),
+    const ("i32.gt_u", U32Gt) => 0x4b code: cmp!(u32; >),
+    const ("i32.le_s", I32Le) => 0x4c code: cmp!(i32; <=),
+    const ("i32.le_u", U32Le) => 0x4d code: cmp!(u32; <=),
+    const ("i32.ge_s", I32Ge) => 0x4e code: cmp!(i32; >=),
+    const ("i32.ge_u", U32Ge) => 0x4f code: cmp!(u32; >=),
 
     // ### i64
-    ("i64.eqz", I64EqZ) => 0x50 code: eqz!(i64),
-    ("i64.eq",   I64Eq) => 0x51 code: cmp!(i64; ==),
-    ("i64.ne",   I64Ne) => 0x52 code: cmp!(i64; !=),
-    ("i64.lt_s", I64Lt) => 0x53 code: cmp!(i64;  <),
-    ("i64.lt_u", U64Lt) => 0x54 code: cmp!(u64;  <),
-    ("i64.gt_s", I64Gt) => 0x55 code: cmp!(i64;  >),
-    ("i64.gt_u", U64Gt) => 0x56 code: cmp!(u64;  >),
-    ("i64.le_s", I64Le) => 0x57 code: cmp!(i64; <=),
-    ("i64.le_u", U64Le) => 0x58 code: cmp!(u64; <=),
-    ("i64.ge_s", I64Ge) => 0x59 code: cmp!(i64; >=),
-    ("i64.ge_u", U64Ge) => 0x5a code: cmp!(u64; >=),
+    const ("i64.eqz", I64EqZ) => 0x50 code: eqz!(i64),
+    const ("i64.eq",   I64Eq) => 0x51 code: cmp!(i64; ==),
+    const ("i64.ne",   I64Ne) => 0x52 code: cmp!(i64; !=),
+    const ("i64.lt_s", I64Lt) => 0x53 code: cmp!(i64;  <),
+    const ("i64.lt_u", U64Lt) => 0x54 code: cmp!(u64;  <),
+    const ("i64.gt_s", I64Gt) => 0x55 code: cmp!(i64;  >),
+    const ("i64.gt_u", U64Gt) => 0x56 code: cmp!(u64;  >),
+    const ("i64.le_s", I64Le) => 0x57 code: cmp!(i64; <=),
+    const ("i64.le_u", U64Le) => 0x58 code: cmp!(u64; <=),
+    const ("i64.ge_s", I64Ge) => 0x59 code: cmp!(i64; >=),
+    const ("i64.ge_u", U64Ge) => 0x5a code: cmp!(u64; >=),
 
     // ### f32
-    ("f32.eq", F32Eq) => 0x5b code: cmp!(f32; ==),
-    ("f32.ne", F32Ne) => 0x5c code: cmp!(f32; !=),
-    ("f32.lt", F32Lt) => 0x5d code: cmp!(f32;  <),
-    ("f32.gt", F32Gt) => 0x5e code: cmp!(f32;  >),
-    ("f32.le", F32Le) => 0x5f code: cmp!(f32; <=),
-    ("f32.ge", F32Ge) => 0x60 code: cmp!(f32; >=),
+    const ("f32.eq", F32Eq) => 0x5b code: cmp!(f32; ==),
+    const ("f32.ne", F32Ne) => 0x5c code: cmp!(f32; !=),
+    const ("f32.lt", F32Lt) => 0x5d code: cmp!(f32;  <),
+    const ("f32.gt", F32Gt) => 0x5e code: cmp!(f32;  >),
+    const ("f32.le", F32Le) => 0x5f code: cmp!(f32; <=),
+    const ("f32.ge", F32Ge) => 0x60 code: cmp!(f32; >=),
 
     // ### f64
-    ("f64.eq", F64Eq) => 0x61 code: cmp!(f32; ==),
-    ("f64.ne", F64Ne) => 0x62 code: cmp!(f32; !=),
-    ("f64.lt", F64Lt) => 0x63 code: cmp!(f32; <),
-    ("f64.gt", F64Gt) => 0x64 code: cmp!(f32; >),
-    ("f64.le", F64Le) => 0x65 code: cmp!(f32; <=),
-    ("f64.ge", F64Ge) => 0x66 code: cmp!(f32; >=),
+    const ("f64.eq", F64Eq) => 0x61 code: cmp!(f64; ==),
+    const ("f64.ne", F64Ne) => 0x62 code: cmp!(f64; !=),
+    const ("f64.lt", F64Lt) => 0x63 code: cmp!(f64; <),
+    const ("f64.gt", F64Gt) => 0x64 code: cmp!(f64; >),
+    const ("f64.le", F64Le) => 0x65 code: cmp!(f64; <=),
+    const ("f64.ge", F64Ge) => 0x66 code: cmp!(f64; >=),
 
 
     // ## Arithmetic
 
     // ### i32
 
-    ("i32.clz",       I32Clz) => 0x67 code: arithmetic!(i32; clz),
-    ("i32.ctz",       I32Ctz) => 0x68 code: arithmetic!(i32; ctz),
-    ("i32.popcnt", I32Popcnt) => 0x69 code: arithmetic!(i32; popcount),
-    ("i32.add",       I32Add) => 0x6a code: arithmetic!(i32;  add),
-    ("i32.sub",       I32Sub) => 0x6b code: arithmetic!(i32;  sub),
-    ("i32.mul",       I32Mul) => 0x6c code: arithmetic!(i32;  mul),
-    ("i32.div_s",     I32Div) => 0x6d code: arithmetic!(i32;  div),
-    ("i32.div_u",     U32Div) => 0x6e code: arithmetic!(u32;  div),
-    ("i32.rem_s",     I32Rem) => 0x6f code: arithmetic!(i32;  rem),
-    ("i32.rem_u",     U32Rem) => 0x70 code: arithmetic!(u32;  rem),
-    ("i32.and",       I32And) => 0x71 code: arithmetic!(i32;  and),
-    ("i32.or",         I32Or) => 0x72 code: arithmetic!(i32;  or),
-    ("i32.xor",       I32Xor) => 0x73 code: arithmetic!(i32;  xor),
-    ("i32.shl",       I32Shl) => 0x74 code: arithmetic!(i32;  shl),
-    ("i32.shr_s",     I32Shr) => 0x75 code: arithmetic!(i32;  shr),
-    ("i32.shr_u",    I32Shru) => 0x76 code: arithmetic!(u32;  shr),
-    ("i32.rotl",     I32Rotl) => 0x77 code: arithmetic!(i32; rotl),
-    ("i32.rotr",     I32Rotr) => 0x78 code: arithmetic!(i32; rotr),
+    const ("i32.clz",       I32Clz) => 0x67 code: arithmetic!(i32; clz),
+    const ("i32.ctz",       I32Ctz) => 0x68 code: arithmetic!(i32; ctz),
+    const ("i32.popcnt", I32Popcnt) => 0x69 code: arithmetic!(i32; popcount),
+    const ("i32.add",       I32Add) => 0x6a code: arithmetic!(i32;  add),
+    const ("i32.sub",       I32Sub) => 0x6b code: arithmetic!(i32;  sub),
+    const ("i32.mul",       I32Mul) => 0x6c code: arithmetic!(i32;  mul),
+    const ("i32.div_s",     I32Div) => 0x6d code: arithmetic!(i32;  div),
+    const ("i32.div_u",     U32Div) => 0x6e code: arithmetic!(u32;  div),
+    const ("i32.rem_s",     I32Rem) => 0x6f code: arithmetic!(i32;  rem),
+    const ("i32.rem_u",     U32Rem) => 0x70 code: arithmetic!(u32;  rem),
+    const ("i32.and",       I32And) => 0x71 code: arithmetic!(i32;  and),
+    const ("i32.or",         I32Or) => 0x72 code: arithmetic!(i32;  or),
+    const ("i32.xor",       I32Xor) => 0x73 code: arithmetic!(i32;  xor),
+    const ("i32.shl",       I32Shl) => 0x74 code: arithmetic!(i32;  shl),
+    const ("i32.shr_s",     I32Shr) => 0x75 code: arithmetic!(i32;  shr),
+    const ("i32.shr_u",    I32Shru) => 0x76 code: arithmetic!(u32;  shr),
+    const ("i32.rotl",     I32Rotl) => 0x77 code: arithmetic!(i32; rotl),
+    const ("i32.rotr",     I32Rotr) => 0x78 code: arithmetic!(i32; rotr),
 
     // ### i64
-    ("i64.clz",       I64Clz) => 0x79 code: arithmetic!(i64; clz),
-    ("i64.ctz",       I64Ctz) => 0x7a code: arithmetic!(i64; ctz),
-    ("i64.popcnt", I64Popcnt) => 0x7b code: arithmetic!(i64; popcount),
-    ("i64.add",       I64Add) => 0x7c code: arithmetic!(i64;  add),
-    ("i64.sub",       I64Sub) => 0x7d code: arithmetic!(i64;  sub),
-    ("i64.mul",       I64Mul) => 0x7e code: arithmetic!(i64;  mul),
-    ("i64.div_s",     I64Div) => 0x7f code: arithmetic!(i64;  div),
-    ("i64.div_u",     U64Div) => 0x80 code: arithmetic!(u64;  div),
-    ("i64.rem_s",     I64Rem) => 0x81 code: arithmetic!(i64;  rem),
-    ("i64.rem_u",     U64Rem) => 0x82 code: arithmetic!(u64;  rem),
-    ("i64.and",       I64And) => 0x83 code: arithmetic!(i64;  and),
-    ("i64.or",         I64Or) => 0x84 code: arithmetic!(i64;  or),
-    ("i64.xor",       I64Xor) => 0x85 code: arithmetic!(i64;  xor),
-    ("i64.shl",       I64Shl) => 0x86 code: arithmetic!(i64;  shl),
-    ("i64.shr_s",     I64Shr) => 0x87 code: arithmetic!(i64;  shr),
-    ("i64.shr_u",    I64Shru) => 0x88 code: arithmetic!(u64;  shr),
-    ("i64.rotl",     I64Rotl) => 0x89 code: arithmetic!(i64; rotl),
-    ("i64.rotr",     I64Rotr) => 0x8a code: arithmetic!(i64; rotr),
+    const ("i64.clz",       I64Clz) => 0x79 code: arithmetic!(i64; clz),
+    const ("i64.ctz",       I64Ctz) => 0x7a code: arithmetic!(i64; ctz),
+    const ("i64.popcnt", I64Popcnt) => 0x7b code: arithmetic!(i64; popcount),
+    const ("i64.add",       I64Add) => 0x7c code: arithmetic!(i64;  add),
+    const ("i64.sub",       I64Sub) => 0x7d code: arithmetic!(i64;  sub),
+    const ("i64.mul",       I64Mul) => 0x7e code: arithmetic!(i64;  mul),
+    const ("i64.div_s",     I64Div) => 0x7f code: arithmetic!(i64;  div),
+    const ("i64.div_u",     U64Div) => 0x80 code: arithmetic!(u64;  div),
+    const ("i64.rem_s",     I64Rem) => 0x81 code: arithmetic!(i64;  rem),
+    const ("i64.rem_u",     U64Rem) => 0x82 code: arithmetic!(u64;  rem),
+    const ("i64.and",       I64And) => 0x83 code: arithmetic!(i64;  and),
+    const ("i64.or",         I64Or) => 0x84 code: arithmetic!(i64;  or),
+    const ("i64.xor",       I64Xor) => 0x85 code: arithmetic!(i64;  xor),
+    const ("i64.shl",       I64Shl) => 0x86 code: arithmetic!(i64;  shl),
+    const ("i64.shr_s",     I64Shr) => 0x87 code: arithmetic!(i64;  shr),
+    const ("i64.shr_u",    I64Shru) => 0x88 code: arithmetic!(u64;  shr),
+    const ("i64.rotl",     I64Rotl) => 0x89 code: arithmetic!(i64; rotl),
+    const ("i64.rotr",     I64Rotr) => 0x8a code: arithmetic!(i64; rotr),
 
     // ### f32
-    ("f32.abs",           F32Abs) => 0x8b code: arithmetic!(float f32; abs),
-    ("f32.neg",           F32Neg) => 0x8c code: arithmetic!(float f32; neg),
-    ("f32.ceil",         F32Ceil) => 0x8d code: arithmetic!(float f32; ceil),
-    ("f32.floor",       F32Floor) => 0x8e code: arithmetic!(float f32; floor),
-    ("f32.trunc",       F32Trunc) => 0x8f code: arithmetic!(float f32; trunc),
-    ("f32.nearest",   F32Nearest) => 0x90 code: arithmetic!(float f32; nearest),
-    ("f32.sqrt",         F32Sqrt) => 0x91 code: arithmetic!(float f32; sqrt),
-    ("f32.add",           F32Add) => 0x92 code: arithmetic!(float f32; add),
-    ("f32.sub",           F32Sub) => 0x93 code: arithmetic!(float f32; sub),
-    ("f32.mul",           F32Mul) => 0x94 code: arithmetic!(float f32; mul),
-    ("f32.div",           F32Div) => 0x95 code: arithmetic!(float f32; div),
-    ("f32.min",           F32Min) => 0x96 code: arithmetic!(float f32; min),
-    ("f32.max",           F32Max) => 0x97 code: arithmetic!(float f32; max),
-    ("f32.copysign", F32CopySign) => 0x98 code: arithmetic!(float f32; copysign),
+    const ("f32.abs",           F32Abs) => 0x8b code: arithmetic!(float f32; abs),
+    const ("f32.neg",           F32Neg) => 0x8c code: arithmetic!(float f32; neg),
+    const ("f32.ceil",         F32Ceil) => 0x8d code: arithmetic!(float f32; ceil),
+    const ("f32.floor",       F32Floor) => 0x8e code: arithmetic!(float f32; floor),
+    const ("f32.trunc",       F32Trunc) => 0x8f code: arithmetic!(float f32; trunc),
+    const ("f32.nearest",   F32Nearest) => 0x90 code: arithmetic!(float f32; nearest),
+    const ("f32.sqrt",         F32Sqrt) => 0x91 code: arithmetic!(float f32; sqrt),
+    const ("f32.add",           F32Add) => 0x92 code: arithmetic!(float f32; add),
+    const ("f32.sub",           F32Sub) => 0x93 code: arithmetic!(float f32; sub),
+    const ("f32.mul",           F32Mul) => 0x94 code: arithmetic!(float f32; mul),
+    const ("f32.div",           F32Div) => 0x95 code: arithmetic!(float f32; div),
+    const ("f32.min",           F32Min) => 0x96 code: arithmetic!(float f32; min),
+    const ("f32.max",           F32Max) => 0x97 code: arithmetic!(float f32; max),
+    const ("f32.copysign", F32CopySign) => 0x98 code: arithmetic!(float f32; copysign),
 
     // ### f64
-    ("f64.abs",           F64Abs) => 0x99 code: arithmetic!(float f64; abs),
-    ("f64.neg",           F64Neg) => 0x9a code: arithmetic!(float f64; neg),
-    ("f64.ceil",         F64Ceil) => 0x9b code: arithmetic!(float f64; ceil),
-    ("f64.floor",       F64Floor) => 0x9c code: arithmetic!(float f64; floor),
-    ("f64.trunc",       F64Trunc) => 0x9d code: arithmetic!(float f64; trunc),
-    ("f64.nearest",   F64Nearest) => 0x9e code: arithmetic!(float f64; nearest),
-    ("f64.sqrt",         F64Sqrt) => 0x9f code: arithmetic!(float f64; sqrt),
-    ("f64.add",           F64Add) => 0xa0 code: arithmetic!(float f64; add),
-    ("f64.sub",           F64Sub) => 0xa1 code: arithmetic!(float f64; sub),
-    ("f64.mul",           F64Mul) => 0xa2 code: arithmetic!(float f64; mul),
-    ("f64.div",           F64Div) => 0xa3 code: arithmetic!(float f64; div),
-    ("f64.min",           F64Min) => 0xa4 code: arithmetic!(float f64; min),
-    ("f64.max",           F64Max) => 0xa5 code: arithmetic!(float f64; max),
-    ("f64.copysign", F64CopySign) => 0xa6 code: arithmetic!(float f64; copysign),
+    const ("f64.abs",           F64Abs) => 0x99 code: arithmetic!(float f64; abs),
+    const ("f64.neg",           F64Neg) => 0x9a code: arithmetic!(float f64; neg),
+    const ("f64.ceil",         F64Ceil) => 0x9b code: arithmetic!(float f64; ceil),
+    const ("f64.floor",       F64Floor) => 0x9c code: arithmetic!(float f64; floor),
+    const ("f64.trunc",       F64Trunc) => 0x9d code: arithmetic!(float f64; trunc),
+    const ("f64.nearest",   F64Nearest) => 0x9e code: arithmetic!(float f64; nearest),
+    const ("f64.sqrt",         F64Sqrt) => 0x9f code: arithmetic!(float f64; sqrt),
+    const ("f64.add",           F64Add) => 0xa0 code: arithmetic!(float f64; add),
+    const ("f64.sub",           F64Sub) => 0xa1 code: arithmetic!(float f64; sub),
+    const ("f64.mul",           F64Mul) => 0xa2 code: arithmetic!(float f64; mul),
+    const ("f64.div",           F64Div) => 0xa3 code: arithmetic!(float f64; div),
+    const ("f64.min",           F64Min) => 0xa4 code: arithmetic!(float f64; min),
+    const ("f64.max",           F64Max) => 0xa5 code: arithmetic!(float f64; max),
+    const ("f64.copysign", F64CopySign) => 0xa6 code: arithmetic!(float f64; copysign),
 
 
     // Conversion
-    ("i32.wrap_i64",               I32WrapI64) => 0xa7 code: round_trip_cast!(u64 <==> u32),
+    const ("i32.wrap_i64",               I32WrapI64) => 0xa7 code: round_trip_cast!(u64 <==> u32),
 
-    ("i32.trunc_f32_s",           I32TruncF32) => 0xa8 code: cast!(f32 ==> i32),
-    ("i32.trunc_f32_u",           U32TruncF32) => 0xa9 code: cast!(f32 ==> u32),
-    ("i32.trunc_f64_s",           I32TruncF64) => 0xaa code: cast!(f64 ==> i32),
-    ("i32.trunc_f64_u",           U32TruncF64) => 0xab code: cast!(f64 ==> u32),
+    const ("i32.trunc_f32_s",           I32TruncF32) => 0xa8 code: cast!(f32 ==> i32),
+    const ("i32.trunc_f32_u",           U32TruncF32) => 0xa9 code: cast!(f32 ==> u32),
+    const ("i32.trunc_f64_s",           I32TruncF64) => 0xaa code: cast!(f64 ==> i32),
+    const ("i32.trunc_f64_u",           U32TruncF64) => 0xab code: cast!(f64 ==> u32),
 
-    ("i64.extend_i32_s",        I64PromoteI32) => 0xac code: cast!(i32 ==> i64),
-    ("i64.extend_i32_u",        I64PromoteU32) => 0xad code: cast!(u32 ==> i64),
+    const ("i64.extend_i32_s",        I64PromoteI32) => 0xac code: cast!(i32 ==> i64),
+    const ("i64.extend_i32_u",        I64PromoteU32) => 0xad code: cast!(u32 ==> i64),
 
-    ("i64.trunc_f32_s",           I64TruncF32) => 0xae code: cast!(f32 ==> i64),
-    ("i64.trunc_f32_u",           U64TruncF32) => 0xaf code: cast!(f32 ==> u64),
-    ("i64.trunc_f64_s",           I64TruncF64) => 0xb0 code: cast!(f64 ==> i64),
-    ("i64.trunc_f64_u",           U64TruncF64) => 0xb1 code: cast!(f64 ==> u64),
+    const ("i64.trunc_f32_s",           I64TruncF32) => 0xae code: cast!(f32 ==> i64),
+    const ("i64.trunc_f32_u",           U64TruncF32) => 0xaf code: cast!(f32 ==> u64),
+    const ("i64.trunc_f64_s",           I64TruncF64) => 0xb0 code: cast!(f64 ==> i64),
+    const ("i64.trunc_f64_u",           U64TruncF64) => 0xb1 code: cast!(f64 ==> u64),
 
-    ("f32.convert_i32_s",       F32ConvertI32) => 0xb2 code: cast!(i32 ==> f32),
-    ("f32.convert_i32_u",       F32ConvertU32) => 0xb3 code: cast!(u32 ==> f32),
-    ("f32.convert_i64_s",       F32ConvertI64) => 0xb4 code: cast!(i64 ==> f32),
-    ("f32.convert_i64_u",       F32ConvertU64) => 0xb5 code: cast!(u64 ==> f32),
+    const ("f32.convert_i32_s",       F32ConvertI32) => 0xb2 code: cast!(i32 ==> f32),
+    const ("f32.convert_i32_u",       F32ConvertU32) => 0xb3 code: cast!(u32 ==> f32),
+    const ("f32.convert_i64_s",       F32ConvertI64) => 0xb4 code: cast!(i64 ==> f32),
+    const ("f32.convert_i64_u",       F32ConvertU64) => 0xb5 code: cast!(u64 ==> f32),
 
-    ("f32.demote_f64",           F32DemoteF64) => 0xb6 code: cast!(f64 ==> f32),
+    const ("f32.demote_f64",           F32DemoteF64) => 0xb6 code: cast!(f64 ==> f32),
 
-    ("f64.convert_i32_s",       F64ConvertI32) => 0xb7 code: cast!(i32 ==> f64),
-    ("f64.convert_i32_u",       F64ConvertU32) => 0xb8 code: cast!(u32 ==> f64),
-    ("f64.convert_i64_s",       F64ConvertI64) => 0xb9 code: cast!(i64 ==> f64),
-    ("f64.convert_i64_u",       F64ConvertU64) => 0xba code: cast!(u64 ==> f64),
+    const ("f64.convert_i32_s",       F64ConvertI32) => 0xb7 code: cast!(i32 ==> f64),
+    const ("f64.convert_i32_u",       F64ConvertU32) => 0xb8 code: cast!(u32 ==> f64),
+    const ("f64.convert_i64_s",       F64ConvertI64) => 0xb9 code: cast!(i64 ==> f64),
+    const ("f64.convert_i64_u",       F64ConvertU64) => 0xba code: cast!(u64 ==> f64),
 
-    ("f64.promote_f32",         F64PromoteF32) => 0xbb code: cast!(f32 ==> f64),
+    const ("f64.promote_f32",         F64PromoteF32) => 0xbb code: cast!(f32 ==> f64),
 
-    ("i32.reinterpret_f32", I32ReinterpretF32) => 0xbc code: in_out!(a: f32; f32::to_bits(a)),
-    ("i64.reinterpret_f64", I64ReinterpretF64) => 0xbd code: in_out!(a: f64; f64::to_bits(a)),
-    ("f32.reinterpret_i32", F32ReinterpretI32) => 0xbe code: in_out!(a: u32; f32::from_bits(a)),
-    ("f64.reinterpret_i64", F64ReinterpretI64) => 0xbf code: in_out!(a: u64; f64::from_bits(a)),
+    const ("i32.reinterpret_f32", I32ReinterpretF32) => 0xbc code: in_out!(a: f32; f32::to_bits(a)),
+    const ("i64.reinterpret_f64", I64ReinterpretF64) => 0xbd code: in_out!(a: f64; f64::to_bits(a)),
+    const ("f32.reinterpret_i32", F32ReinterpretI32) => 0xbe code: in_out!(a: u32; f32::from_bits(a)),
+    const ("f64.reinterpret_i64", F64ReinterpretI64) => 0xbf code: in_out!(a: u64; f64::from_bits(a)),
 
 
     // ## Sign extension
 
-    ("i32.extend8_s",   I32ExtendI8) => 0xC0 code: round_trip_cast!(i32 <==>  i8),
-    ("i32.extend16_s", I32ExtendI16) => 0xC1 code: round_trip_cast!(i32 <==> i16),
-    ("i64.extend8_s",   I64ExtendI8) => 0xC2 code: round_trip_cast!(i64 <==> i16),
-    ("i64.extend16_s", I64ExtendI16) => 0xC3 code: round_trip_cast!(i64 <==> i16),
-    ("i64.extend32_s", I64ExtendI32) => 0xC4 code: round_trip_cast!(i64 <==> i32),
+    const ("i32.extend8_s",   I32ExtendI8) => 0xC0 code: round_trip_cast!(i32 <==>  i8),
+    const ("i32.extend16_s", I32ExtendI16) => 0xC1 code: round_trip_cast!(i32 <==> i16),
+    const ("i64.extend8_s",   I64ExtendI8) => 0xC2 code: round_trip_cast!(i64 <==> i16),
+    const ("i64.extend16_s", I64ExtendI16) => 0xC3 code: round_trip_cast!(i64 <==> i16),
+    const ("i64.extend32_s", I64ExtendI32) => 0xC4 code: round_trip_cast!(i64 <==> i32),
 
     // ## Saturating Conversion
     // ("i32.trunc_sat_f32_s", I32TruncSatF32) => 0xfc -> 0,
@@ -1324,7 +1390,7 @@ instruction! {
     // Vector Instructions
 
     // ## Vector Memory Instructions
-    ("v128.load",                 V128Load) => 0xfd ->  0 (MemoryArgument) code: load!(i128),
+    const ("v128.load",                 V128Load) => 0xfd ->  0 (MemoryArgument) code: load!(i128),
     // ("v128.load8x8_s",        V128LoadI8x8) => 0xfd ->  1 (MemoryArgument),
     // ("v128.load8x8_u",        V128LoadU8x8) => 0xfd ->  2 (MemoryArgument),
     // ("v128.load16x4_s",      V128LoadI16x4) => 0xfd ->  3 (MemoryArgument),
@@ -1348,7 +1414,7 @@ instruction! {
     // ("v128.store64_lane",  V128Store64Lane) => 0xfd -> 91 (MemoryArgument, Vector64x2Lane),
 
     // ## Vector Constant
-    ("v128.const", V128Const) => 0xfd -> 12 (u128) code: immediate!(u128),
+    const ("v128.const", V128Const) => 0xfd -> 12 (u128) code: immediate!(u128),
     //
     // // ## Vector Shuffle
     // ("v128.shuffle", V128Shuffle) => 0xfd -> 13 ([Vector8x16Lane; 16]),
@@ -1447,13 +1513,13 @@ instruction! {
     // ## Bitwise operations
 
     // ### v128
-    ("v128.not",             V128Not) => 0xfd -> 77 code: arithmetic!(i128; not),
-    ("v128.and",             V128And) => 0xfd -> 78 code: arithmetic!(i128; and),
+    const ("v128.not",             V128Not) => 0xfd -> 77 code: arithmetic!(i128; not),
+    const ("v128.and",             V128And) => 0xfd -> 78 code: arithmetic!(i128; and),
     // ("v128.andnot",       V128AndNot) => 0xfd -> 79,
-    ("v128.or",               V128Or) => 0xfd -> 80 code: arithmetic!(i128; or),
-    ("v128.xor",             V128Xor) => 0xfd -> 81 code: arithmetic!(i128; xor),
+    const ("v128.or",               V128Or) => 0xfd -> 80 code: arithmetic!(i128; or),
+    const ("v128.xor",             V128Xor) => 0xfd -> 81 code: arithmetic!(i128; xor),
     // ("v128.bitselect", V128BitSelect) => 0xfd -> 82,
-    ("v128.any_true",    V128AnyTrue) => 0xfd -> 83 code: compare!(a: i128; a != 0),
+    const ("v128.any_true",    V128AnyTrue) => 0xfd -> 83 code: compare!(a: i128; a != 0),
     //
     //
     // // ## Numeric operations
