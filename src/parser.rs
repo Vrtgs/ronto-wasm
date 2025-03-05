@@ -89,8 +89,6 @@ trait Enum: Sized {
     type Discriminant: Decode + Debug + Display + Copy + Clone + 'static;
     const VARIANTS: &'static [Self::Discriminant];
 
-    fn discriminant(&self) -> Self::Discriminant;
-
     fn enum_try_decode(
         variant: Self::Discriminant,
         file: &mut ReadTape<impl Read>,
@@ -209,14 +207,6 @@ macro_rules! decodable {
                 union_discriminants
             };
 
-            #[inline(always)]
-            fn discriminant(&self) -> Self::Discriminant {
-                match self {
-                    Self::$first_ty(x) => <$first_ty as Enum>::discriminant(x),
-                    $(Self::$rest(x) => <$rest as Enum>::discriminant(x)),*
-                }
-            }
-
             #[doc(hidden)]
             #[inline(always)]
             fn enum_try_decode(variant: Self::Discriminant, file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
@@ -249,12 +239,6 @@ macro_rules! decodable {
             type Discriminant = $type;
             #[doc(hidden)]
             const VARIANTS: &[$type] = &[$($value),*];
-
-            fn discriminant(&self) -> Self::Discriminant {
-                match *self {
-                    $(Self::$variant $(($(discard!($inner),)*))? $({ $($ident: _),* })? => $value),*
-                }
-            }
 
             #[inline(always)]
             fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
@@ -469,7 +453,7 @@ decodable! {
         description: ExportDescription,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Copy, Clone)]
     enum ExportDescription: u8 {
         Function(FunctionIndex) = 0x00,
         Table(TableIndex) = 0x01,
@@ -505,11 +489,11 @@ decodable! {
 pub struct Element {
     pub kind: ElementKind,
     pub init: WasmVec<Expression>,
-    pub mode: ElementMode,
+    pub mode: InitMode,
 }
 
 #[derive(Debug)]
-pub enum ElementMode {
+pub enum InitMode {
     Active { index: Index, offset: Expression },
     Passive,
     Declarative,
@@ -526,13 +510,13 @@ impl Decode for Element {
                     _ => unreachable!(),
                 };
                 let offset = Expression::decode(file)?;
-                ElementMode::Active {
+                InitMode::Active {
                     index: table.0,
                     offset,
                 }
             }
-            0x01 | 0x05 => ElementMode::Passive,
-            0x03 | 0x07 => ElementMode::Declarative,
+            0x01 | 0x05 => InitMode::Passive,
+            0x03 | 0x07 => InitMode::Declarative,
             _ => return Err(invalid_data("invalid element flags")),
         };
         let kind = match flags {
@@ -631,18 +615,18 @@ decodable! {
 
 pub struct Data {
     pub init: WasmVec<u8>,
-    pub mode: ElementMode,
+    pub mode: InitMode,
 }
 
 impl Decode for Data {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let mode = match u32::decode(file)? {
-            0 => ElementMode::Active {
+            0 => InitMode::Active {
                 index: MemoryIndex::ZERO.0,
                 offset: Expression::decode(file)?,
             },
-            1 => ElementMode::Passive,
-            2 => ElementMode::Active {
+            1 => InitMode::Passive,
+            2 => InitMode::Active {
                 index: MemoryIndex::decode(file)?.0,
                 offset: Expression::decode(file)?,
             },
@@ -749,6 +733,7 @@ decodable! {
 
 pub use crate::instruction::Instruction;
 use crate::invalid_data;
+use crate::runtime::{ReferenceValue, Value, WasmVirtualMachine};
 use crate::vector::{Index, WasmVec};
 
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -807,6 +792,35 @@ impl Decode for IfElseBlock {
 #[derive(Debug, PartialEq, Clone)]
 pub struct Expression {
     pub instructions: WasmVec<Instruction>,
+}
+
+impl Expression {
+    pub fn const_eval(&self, vm: &WasmVirtualMachine) -> Option<Value> {
+        let [instruction] = &*self.instructions else {
+            return None;
+        };
+
+        Some(match *instruction {
+            Instruction::I32Const(val) => Value::I32(val),
+            Instruction::I64Const(val) => Value::I64(val),
+            Instruction::F32Const(val) => Value::F32(val),
+            Instruction::F64Const(val) => Value::F64(val),
+            Instruction::V128Const(val) => Value::V128(val as i128),
+            Instruction::RefNull(ReferenceType::Extern) => {
+                Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
+            }
+            Instruction::RefNull(ReferenceType::Function) => {
+                Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
+            }
+            Instruction::RefFunc(func) => Value::Ref(ReferenceValue::Function(func)),
+            // TODO: only allow imported globals
+            Instruction::GlobalGet(glob) => vm.load_global(glob)?,
+            _ => {
+                assert!(!instruction.const_available());
+                return None;
+            }
+        })
+    }
 }
 
 impl Expression {
@@ -872,7 +886,7 @@ pub struct WasmBinary {
 
 impl Decode for WasmBinary {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        expect!(file.read_chunk()? == *b"\0asm", "invalid data")?;
+        expect!(file.read_chunk()? == *b"\0asm", "invalid magic bytes")?;
         let version = WasmVersion::decode(file)?;
         let mut custom_sections = vec![];
         let mut sections = WasmSections {

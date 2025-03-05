@@ -4,7 +4,6 @@ use crate::vector::Index;
 use bytemuck::Pod;
 use std::cell::RefCell;
 use std::fmt::Formatter;
-use std::rc::Rc;
 
 pub const PAGE_SIZE: u32 = 65536;
 
@@ -24,7 +23,7 @@ macro_rules! make_memory_error {
 
         impl $name {
             #[cold]
-            pub fn new() -> Self {
+            pub(crate) fn new() -> Self {
                 Self {
                     _priv: ()
                 }
@@ -46,7 +45,7 @@ pub enum MemoryError {
     MemoryFault(#[from] MemoryFault),
 }
 
-pub trait MemoryArgument: Copy {
+pub(crate) trait MemoryArgument: Copy {
     fn offset(self) -> Index;
     fn align(self) -> usize;
 }
@@ -57,14 +56,27 @@ impl MemoryArgument for parser::MemoryArgument {
     }
 
     fn align(self) -> usize {
-        self.align.as_usize()
+        1 << self.align.0
+    }
+}
+
+#[derive(Copy, Clone)]
+struct UnalignedAccess;
+
+impl MemoryArgument for UnalignedAccess {
+    fn offset(self) -> Index {
+        Index::ZERO
+    }
+
+    fn align(self) -> usize {
+        1
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryBuffer {
     limit: Limit,
-    buffer: Rc<RefCell<Vec<u8>>>,
+    buffer: RefCell<Vec<u8>>,
 }
 
 macro_rules! assign_or {
@@ -85,10 +97,16 @@ macro_rules! access {
     (&$(mut $(@$_mut:tt)?)? $buffer:expr, $memory_argument:expr, $addr:expr, $size:expr; $map: expr) => {{
         paste::paste! { let buffer = & $(mut $(@$_mut)?)? ** $buffer.[<borrow $(_mut $($_mut)?)?>](); }
 
-        assign_or_fault!(addr = $memory_argument.offset().checked_add($addr));
+        assign_or_fault!(addr = $memory_argument.offset().0.checked_add($addr.0).map(Index));
         assign_or_fault!(end  = addr.as_usize().checked_add($size));
 
         paste::paste! { assign_or_fault!(bytes = buffer.[<get $(_mut $($_mut)?)?>](addr.as_usize()..end));  }
+
+        if (bytes.as_ptr().addr() % $memory_argument.align()) != 0 {
+            #[cold]
+            fn cold() {}
+            cold()
+        }
 
         Ok(($map)(bytes))
     }};
@@ -98,7 +116,7 @@ impl MemoryBuffer {
     pub fn new(limit: Limit) -> Result<Self, OutOfMemory> {
         let this = Self {
             limit,
-            buffer: Rc::new(RefCell::new(Vec::new())),
+            buffer: RefCell::new(Vec::new()),
         };
         if limit.min != Index::ZERO {
             this.grow(limit.min)?;
@@ -115,7 +133,7 @@ impl MemoryBuffer {
     }
 
     pub fn size(&self) -> Index {
-        Index::from_usize(self.buffer.borrow().len())
+        Index(Index::from_usize(self.buffer.borrow().len()).0 / PAGE_SIZE)
     }
 
     pub fn grow(&self, additional: Index) -> Result<Index, OutOfMemory> {
@@ -125,8 +143,9 @@ impl MemoryBuffer {
         assign_or!(additional = additional.0.checked_mul(PAGE_SIZE).map(Index); OutOfMemory::new());
 
         if Index::from_usize(buffer.len())
-            .checked_add(additional)
-            .is_none_or(|idx| idx > self.limit.max)
+            .0
+            .checked_add(additional.0)
+            .is_none_or(|idx| idx > self.limit.max.0)
         {
             return Err(OutOfMemory::new());
         }
@@ -145,7 +164,32 @@ impl MemoryBuffer {
         Ok(top)
     }
 
-    pub fn load<T: Pod>(
+    pub fn alloc(&self, bytes: Index) -> Result<Index, OutOfMemory> {
+        self.grow(Index(bytes.0.div_ceil(PAGE_SIZE)))
+            .map(|sz| Index(sz.0 * PAGE_SIZE))
+    }
+
+    pub fn place<T: Pod>(&self, data: &T) -> Result<Index, OutOfMemory> {
+        self.place_bytes(bytemuck::bytes_of(data))
+    }
+
+    pub fn place_bytes(&self, bytes: &[u8]) -> Result<Index, OutOfMemory> {
+        let size = Index(bytes.len().try_into().map_err(|_| OutOfMemory::new())?);
+        let ptr = self.alloc(size)?;
+        self.store_bytes(ptr, bytes)
+            .expect("there needs to be enough space after alloc");
+        Ok(ptr)
+    }
+
+    pub fn store_bytes(&self, addr: Index, value: &[u8]) -> Result<(), MemoryFault> {
+        self.store_bytes_internal(UnalignedAccess, addr, value)
+    }
+
+    pub fn load_bytes(&self, addr: Index, n: Index) -> Result<Box<[u8]>, MemoryFault> {
+        access!(&self.buffer, UnalignedAccess, addr, n.as_usize(); Box::<[u8]>::from)
+    }
+
+    pub(crate) fn load_internal<T: Pod>(
         &self,
         memory_argument: impl MemoryArgument,
         addr: Index,
@@ -153,18 +197,35 @@ impl MemoryBuffer {
         access!(&self.buffer, memory_argument, addr, size_of::<T>(); bytemuck::pod_read_unaligned)
     }
 
-    pub fn store<T: Pod>(
+    pub fn load<T: Pod>(&self, addr: Index) -> Result<T, MemoryFault> {
+        self.load_internal(UnalignedAccess, addr)
+    }
+
+    pub(crate) fn store_bytes_internal(
+        &self,
+        memory_argument: impl MemoryArgument,
+        addr: Index,
+        value: &[u8],
+    ) -> Result<(), MemoryFault> {
+        access!(&mut self.buffer, memory_argument, addr, value.len(); |bytes: &mut [u8]| {
+            bytes.copy_from_slice(value)
+        })
+    }
+
+    pub(crate) fn store_internal<T: Pod>(
         &self,
         memory_argument: impl MemoryArgument,
         addr: Index,
         value: &T,
     ) -> Result<(), MemoryFault> {
-        access!(&mut self.buffer, memory_argument, addr, size_of::<T>(); |bytes: &mut [u8]| {
-            bytes.copy_from_slice(bytemuck::bytes_of(value))
-        })
+        self.store_bytes_internal(memory_argument, addr, bytemuck::bytes_of(value))
     }
 
-    pub fn fill(
+    pub fn store<T: Pod>(&self, addr: Index, value: &T) -> Result<(), MemoryFault> {
+        self.store_internal(UnalignedAccess, addr, value)
+    }
+
+    pub(crate) fn fill(
         &self,
         memory_argument: impl MemoryArgument,
         addr: Index,
@@ -176,6 +237,12 @@ impl MemoryBuffer {
             // slices are perfectly valid for reads and writes for |slice| and are always aligned
             // and u8 ... is a valid layout for u8
             unsafe { std::ptr::write_bytes(bytes.as_mut_ptr(), byte, size_of_val(bytes)) }
+        })
+    }
+
+    pub fn init(&self, offset: Index, data: &[u8]) -> Result<(), MemoryFault> {
+        access!(&mut self.buffer, UnalignedAccess, offset, data.len(); |bytes: &mut [u8]| {
+            bytes.copy_from_slice(data)
         })
     }
 }

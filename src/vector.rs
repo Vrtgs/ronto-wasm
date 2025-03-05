@@ -54,13 +54,6 @@ impl Index {
         Some(Index(index as u32))
     }
 
-    pub const fn checked_add(self, other: Index) -> Option<Index> {
-        match self.0.checked_add(other.0) {
-            Some(x) => Some(Index(x)),
-            None => None,
-        }
-    }
-
     pub const fn from_usize(index: usize) -> Index {
         unwrap_index_error!(Self::try_from_usize(index))
     }

@@ -190,6 +190,7 @@ mod tests {
             paste! {
                 proptest! {
                     #[test]
+                    #[cfg_attr(miri, ignore)]
                     fn [< decodes_ $int _properly >](value: $int) {
                         #[allow(unused_comparisons)]
                         const IS_SIGNED: bool = $int::MIN < 0;
