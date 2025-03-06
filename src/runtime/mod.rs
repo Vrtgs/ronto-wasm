@@ -1,19 +1,15 @@
 use crate::instruction::{ExecutionError, FunctionInput, FunctionOutput};
-use crate::parser::{
-    Data, Element, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex,
-    GlobalType, ImportDescription, InitMode, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex,
-    NumericType, ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary,
-    WasmSections, WasmVersion,
-};
+use crate::parser::{Data, DataIndex, Element, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, InitMode, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
 use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
 use crate::vector::{Index, WasmVec};
-use crate::{Stack as _, invalid_data};
+use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
+use std::any::type_name;
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
@@ -197,6 +193,26 @@ impl_numeric_value! {
     F32  =>  f32,
     F64  =>  f64,
     V128 => i128; u128,
+}
+
+impl ValueInner for Index {
+    const r#TYPE: ValueType = <u32 as ValueInner>::r#TYPE;
+
+    fn into(self) -> Value {
+        <u32 as ValueInner>::into(self.0)
+    }
+
+    fn from(data: Value) -> Option<Self> {
+        <u32 as ValueInner>::from(data).map(Index)
+    }
+
+    fn from_ref(data: &Value) -> Option<&Self> {
+        <u32 as ValueInner>::from_ref(data).map(bytemuck::must_cast_ref)
+    }
+
+    fn from_mut(data: &mut Value) -> Option<&mut Self> {
+        <u32 as ValueInner>::from_mut(data).map(bytemuck::must_cast_mut)
+    }
 }
 
 impl_reference_value! {
@@ -420,7 +436,7 @@ impl Import {
                 let output = fun(input);
                 Out::push(output, context.stack)
             }))
-            .map_err(drop)
+                .map_err(drop)
         });
         let signature = NativeFunctionSignature {
             input: In::subtype,
@@ -450,17 +466,17 @@ impl WasmVirtualMachine {
     #[allow(clippy::too_many_arguments)]
     fn create(
         types: WasmVec<TypeInfo>,
-        functions: impl IntoIterator<Item = Function>,
-        tables: impl IntoIterator<Item = Table>,
-        memory: impl IntoIterator<Item = MemoryBuffer>,
+        functions: impl IntoIterator<Item=Function>,
+        tables: impl IntoIterator<Item=Table>,
+        memory: impl IntoIterator<Item=MemoryBuffer>,
         exports: HashMap<Box<str>, ExportDescription>,
-        global_stubs: impl IntoIterator<Item = GlobalValue>,
-        data: impl IntoIterator<Item = Data>,
-        element: impl IntoIterator<Item = Element>,
+        global_stubs: impl IntoIterator<Item=GlobalValue>,
+        data: impl IntoIterator<Item=Data>,
+        element: impl IntoIterator<Item=Element>,
         start: Option<FunctionIndex>,
-        constructors: impl IntoIterator<Item = Constructor>,
+        constructors: impl IntoIterator<Item=Constructor>,
     ) -> io::Result<Self> {
-        fn collect_wasm_vec<T>(it: impl IntoIterator<Item = T>) -> io::Result<WasmVec<T>> {
+        fn collect_wasm_vec<T>(it: impl IntoIterator<Item=T>) -> io::Result<WasmVec<T>> {
             WasmVec::try_from(it.into_iter().collect::<Box<[_]>>())
                 .map_err(|_| invalid_data("too many functions in store"))
         }
@@ -586,7 +602,7 @@ impl WasmVirtualMachine {
         let global_setter = |this: &mut WasmVirtualMachine| {
             for (i, global_constructor) in global_constructors {
                 global_constructor
-                    .const_eval(&this)
+                    .const_eval(this)
                     .ok_or_else(|| invalid_data("global constructor not available in const"))
                     .and_then(|new_value| {
                         (*this.globals)[i].store_mut(new_value).map_err(|_| {
@@ -722,7 +738,7 @@ impl WasmVirtualMachine {
 
     pub fn with_imports<'a, S1: Into<Cow<'a, str>>, S2: Into<Cow<'a, str>>>(
         binary: WasmBinary,
-        imports: impl IntoIterator<Item = ((S1, S2), Import)>,
+        imports: impl IntoIterator<Item=((S1, S2), Import)>,
     ) -> io::Result<Self> {
         let prelude_imports = match binary.version {
             WasmVersion::Version1 => iter::empty(),
@@ -825,7 +841,7 @@ impl WasmVirtualMachine {
         self.types.get(index.0)
     }
 
-    fn call_unchecked(
+    pub(crate) fn call_unchecked(
         &self,
         function: &Function,
         stack: &mut Vec<Value>,
@@ -853,7 +869,7 @@ impl WasmVirtualMachine {
                     .collect::<Box<[_]>>();
                 WasmVec::from_trusted_box(locals)
             }
-            Body::Import(_) => const { WasmVec::new() },
+            Body::Import(_) => const { WasmVec::new() }
         };
 
         let return_address = Index::from_usize(stack.len());
@@ -885,7 +901,13 @@ impl WasmVirtualMachine {
         let r#type = self.types.get(function.r#type.0).ok_or(Trap)?;
 
         if !T::subtype(&r#type.parameters) || !U::subtype(&r#type.result) {
-            panic!("call type mismatch")
+            panic!(
+                "call type mismatch, expected {:?} -> {:?}, found {} -> {}",
+                r#type.parameters,
+                r#type.result,
+                type_name::<T>(),
+                type_name::<U>()
+            )
         }
 
         let mut stack = parameter.into_input();
@@ -927,7 +949,7 @@ struct Frame {
 }
 
 pub struct Validator<'a> {
-    environment: &'a WasmVirtualMachine,
+    virtual_machine: &'a WasmVirtualMachine,
     verification_stack: Vec<ValueType>,
     hit_unreachable: bool,
     frames: Rc<RefCell<Vec<Frame>>>,
@@ -975,13 +997,13 @@ impl<'a> Validator<'a> {
     }
 
     pub(crate) fn pop_type_input(&mut self, r#type: TypeIndex) -> bool {
-        self.environment
+        self.virtual_machine
             .get_type_input(r#type)
             .is_some_and(|ty| self.pop_slice(ty))
     }
 
     pub(crate) fn push_type_output(&mut self, r#type: TypeIndex) -> bool {
-        self.environment
+        self.virtual_machine
             .get_type_output(r#type)
             .map(|ty| self.push_slice(ty))
             .is_some()
@@ -991,7 +1013,7 @@ impl<'a> Validator<'a> {
         let guard = Rc::clone(&self.frames);
         guard.borrow_mut().push(Frame {
             locals: self
-                .environment
+                .virtual_machine
                 .functions
                 .get(function.0)
                 .and_then(|func| match &func.body {
@@ -1019,17 +1041,21 @@ impl<'a> Validator<'a> {
         })
     }
 
+    pub(crate) fn contains_data(&self, data: DataIndex) -> bool {
+        self.virtual_machine.data.get(data.0).is_some()
+    }
+
     pub(crate) fn contains_label(&self, label: LabelIndex) -> bool {
-        Index::from_usize(self.frames.borrow().len()) > label.0
+        self.frames.borrow().last().is_some_and(|frame| frame.labels > label.0.0)
     }
 
     pub(crate) fn contains_table(&self, label: TableIndex) -> bool {
-        self.environment.tables.get(label.0).is_some()
+        self.virtual_machine.tables.get(label.0).is_some()
     }
 
     pub(crate) fn simulate_call(&mut self, function: FunctionIndex) -> bool {
-        if self.environment.functions.get(function.0).is_some() {
-            if let Some(func) = self.environment.functions.get(function.0) {
+        if self.virtual_machine.functions.get(function.0).is_some() {
+            if let Some(func) = self.virtual_machine.functions.get(function.0) {
                 let type_index = func.r#type;
                 return self.pop_type_input(type_index) && self.push_type_output(type_index);
             }
@@ -1038,7 +1064,7 @@ impl<'a> Validator<'a> {
     }
 
     pub(crate) fn get_global(&self, global: GlobalIndex) -> Option<GlobalType> {
-        self.environment
+        self.virtual_machine
             .globals
             .get(global.0)
             .map(|global| match *global {
@@ -1074,7 +1100,7 @@ impl<'a> Validator<'a> {
     }
 
     pub(crate) fn environment(&self) -> &'a WasmVirtualMachine {
-        self.environment
+        self.virtual_machine
     }
 
     pub(crate) fn peek(&mut self) -> Option<&ValueType> {
@@ -1175,17 +1201,20 @@ impl<'a> WasmContext<'a> {
             })
     }
 
+    pub(crate) fn mem(&self, mem_index: MemoryIndex) -> Result<&MemoryBuffer, MemoryFault> {
+        self.virtual_machine
+            .memory
+            .get(mem_index.0)
+            .ok_or_else(MemoryFault::new)
+    }
+
     pub(crate) fn mem_load<T: Pod>(
         &self,
         mem_index: MemoryIndex,
         argument: MemoryArgument,
         index: Index,
     ) -> Result<T, MemoryFault> {
-        self.virtual_machine
-            .memory
-            .get(mem_index.0)
-            .ok_or_else(MemoryFault::new)
-            .and_then(|mem| mem.load_internal(argument, index))
+        self.mem(mem_index).and_then(|mem| mem.load_internal(argument, index))
     }
 
     pub(crate) fn mem_store<T: Pod>(
@@ -1195,19 +1224,20 @@ impl<'a> WasmContext<'a> {
         index: Index,
         value: &T,
     ) -> Result<(), MemoryFault> {
-        self.virtual_machine
-            .memory
-            .get(mem_index.0)
-            .ok_or_else(MemoryFault::new)
-            .and_then(|mem| mem.store_internal(argument, index, value))
+        self.mem(mem_index).and_then(|mem| mem.store_internal(argument, index, value))
     }
 
     pub(crate) fn mem_grow(&self, mem_index: MemoryIndex, by: Index) -> Result<Index, MemoryError> {
-        self.virtual_machine
-            .memory
-            .get(mem_index.0)
-            .ok_or_else(|| MemoryError::MemoryFault(MemoryFault::new()))
+        self.mem(mem_index)
+            .map_err(MemoryError::MemoryFault)
             .and_then(|mem| mem.grow(by).map_err(MemoryError::from))
+    }
+
+    pub(crate) fn mem_init(&self, mem_index: MemoryIndex, offset: Index, data: DataIndex, data_offset: Index, n: Index) -> Result<(), MemoryFault> {
+        let data = self.virtual_machine.data.get(data.0).ok_or_else(MemoryFault::new)?;
+        let data_end = data_offset.0.checked_add(n.0).map(Index).ok_or_else(MemoryFault::new)?;
+        let data = (*data.init).get(data_offset.as_usize()..data_end.as_usize()).ok_or_else(MemoryFault::new)?;
+        self.mem(mem_index).and_then(|mem| mem.init(offset, data))
     }
 
     pub(crate) fn mem_size(&self, mem_index: MemoryIndex) -> Result<Index, MemoryFault> {

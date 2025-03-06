@@ -1,13 +1,9 @@
-use crate::parser::{
-    BlockType, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock,
-    LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte,
-    TypeIndex, ValueType,
-};
+use crate::parser::{BlockType, DataIndex, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::{MemoryError, MemoryFault};
 use crate::runtime::{ReferenceValue, StackFrame, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
-use crate::{Stack, invalid_data};
+use crate::{invalid_data, Stack};
 use bytemuck::Pod;
 use std::convert::Infallible;
 use std::io::{Read, Result};
@@ -19,11 +15,14 @@ type Function = FunctionIndex;
 type Label = LabelIndex;
 type Type = TypeIndex;
 type Table = TableIndex;
+type Data = DataIndex;
 type Labels = WasmVec<Label>;
 type Local = LocalIndex;
 
 type Global = GlobalIndex;
 type NullByte = TagByte<0x00>;
+
+type ShuffleArg = [Vector8x32Lane; 16];
 
 macro_rules! ty_param_discard {
     ($_:ty) => {
@@ -271,7 +270,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    Primitive<Data, In, Out, F>
+Primitive<Data, In, Out, F>
 {
     pub const fn full(f: F) -> Self {
         Self {
@@ -282,6 +281,9 @@ impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
 }
 
 // static CURRENT_INSTRUCTIONS: Mutex<Vec<Instruction>> = Mutex::new(vec![]);
+
+
+// TODO make param trait
 
 pub trait FunctionInput: Sized + 'static {
     fn validate(validator: &mut Validator) -> bool;
@@ -369,7 +371,7 @@ impl<T: ValueInner> FunctionOutput for T {
     }
 
     fn subtype(ty: &[ValueType]) -> bool {
-        <T as FunctionInput>::subtype(ty)
+        ty == [T::r#TYPE]
     }
 }
 
@@ -556,7 +558,7 @@ impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
             IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions),
         };
 
-        let instr = match u32::get(context.stack) {
+        let instr = match i32::get(context.stack) {
             0 => if_not,
             _ => if_so,
         };
@@ -568,14 +570,8 @@ impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
 struct Branch<T>(PhantomData<T>);
 
 impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
-    fn validate(&self, &label: &Label, validator: &mut Validator) -> bool {
-        let has_label = validator.contains_label(label);
-        let contains_condition = !T::CONDITIONAL || i32::validate(validator);
-        let ret = has_label && contains_condition;
-        if !T::CONDITIONAL {
-            validator.set_unreachable()
-        }
-        ret
+    fn validate(&self, &label: &Label, _: &mut Validator) -> bool {
+        todo!()
     }
 
     fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
@@ -619,7 +615,7 @@ impl InstructionCode<(&Labels, &Label)> for BranchTable {
         (labels, &fallback): (&Labels, &Label),
         context: &mut WasmContext,
     ) -> ExecutionResult {
-        let idx = Index(u32::get(context.stack));
+        let idx = Index::get(context.stack);
         let label = match labels.get(idx) {
             Some(&label) => label,
             None => fallback,
@@ -643,17 +639,32 @@ impl InstructionCode<()> for Drop {
 struct Select;
 impl InstructionCode<()> for Select {
     fn validate(&self, (): (), validator: &mut Validator) -> bool {
-        i32::validate(validator) && validator.pop_n().is_some_and(|[a, b]| a == b)
+        i32::validate(validator) && validator.pop_n()
+            .is_some_and(|[a, b]| a == b && !matches!(a, ValueType::ReferenceType(_)))
     }
 
     fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
-        let [val2, val1] = context.pop_n().unwrap();
-        let value = match i32::get(context.stack) {
-            0 => val2,
-            _ => val1,
+        let [val1, val2, cond] = context.pop_n().unwrap();
+        let value = match cond {
+            Value::I32(0) => val2,
+            Value::I32(_) => val1,
+            _ => unreachable!()
         };
         context.push(value);
         Ok(())
+    }
+}
+
+impl InstructionCode<&OptionalValueType> for Select {
+    fn validate(&self, &ty: &OptionalValueType, validator: &mut Validator) -> bool {
+        let Some(ty) = ty.0 else {
+            return Select::validate(self, (), validator);
+        };
+        i32::validate(validator) && validator.pop_n().is_some_and(|[a, b]| ty == b && a == ty)
+    }
+
+    fn call(&self, _: &OptionalValueType, context: &mut WasmContext) -> ExecutionResult {
+        Select::call(self, (), context)
     }
 }
 
@@ -669,12 +680,10 @@ impl InstructionCode<&ReferenceType> for RefNull {
     }
 
     fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
-        match ref_ty {
-            ReferenceType::Function => {
-                context.push(Value::Ref(ReferenceValue::Function(Function::NULL)))
-            }
-            ReferenceType::Extern => context.push(Value::Ref(ReferenceValue::Extern(Extern::NULL))),
-        }
+        context.push(Value::Ref(match ref_ty {
+            ReferenceType::Function => ReferenceValue::Function(Function::NULL),
+            ReferenceType::Extern => ReferenceValue::Extern(Extern::NULL),
+        }));
         Ok(())
     }
 }
@@ -705,7 +714,7 @@ impl InstructionCode<(&Table, &Type)> for Call {
         (&table_idx, &expected_ty): (&Table, &Type),
         context: &mut WasmContext,
     ) -> ExecutionResult {
-        let idx = Index(u32::get(context.stack));
+        let idx = Index::get(context.stack);
         let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
             unreachable!();
         };
@@ -871,17 +880,17 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::get(context.stack));
+                let index = Index::get(context.stack);
                 let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(value.into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).unwrap();
-                let index = Index(u32::get(context.stack));
+                let index = Index::get(context.stack);
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => {
-                let index = Index(u32::get(context.stack));
+                let index = Index::get(context.stack);
                 let value = context.peek().and_then(T::from_ref).unwrap();
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
             }
@@ -924,7 +933,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-    for CastingMemoryAccess<T, E, A>
+for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
@@ -934,18 +943,33 @@ impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgumen
     fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
-                let index = Index(u32::get(context.stack));
+                let index = Index::get(context.stack);
                 let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
                 context.push(E::extend(value).into());
             }
             AccessType::Set => {
                 let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
-                let index = Index(u32::get(context.stack));
+                let index = Index::get(context.stack);
                 context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => unreachable!(),
         }
         Ok(())
+    }
+}
+
+struct MemoryInit;
+
+impl InstructionCode<(&Data, &NullByte)> for MemoryInit {
+    fn validate(&self, (&data, _): (&Data, &NullByte), _: &mut Validator) -> bool {
+        todo!()
+    }
+
+    fn call(&self, (&data, _): (&Data, &NullByte), context: &mut WasmContext) -> ExecutionResult {
+        let (mem_offset, data_offset, n) = <(Index, Index, Index)>::get(context.stack);
+
+        // context.mem_init(MemoryIndex::ZERO, mem_offset, data, data_offset, n).map_err(Into::into)
+        todo!()
     }
 }
 
@@ -955,7 +979,6 @@ macro_rules! vector_lane {
             $first: ident $( $rest:ident)*
         }
     ) => {
-        const _: () = assert!(128 == ($count * $bits) && ($count as u8).is_power_of_two() && ($bits as u8).is_power_of_two());
         paste::paste!{
             #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
             #[repr(u8)]
@@ -1001,6 +1024,20 @@ macro_rules! vector_lane {
             }
         }
     };
+}
+
+
+vector_lane! {
+    8 x 32 {
+        _00 _01 _02 _03
+        _04 _05 _06 _07
+        _08 _09 _10 _11
+        _12 _13 _14 _15
+        _16 _17 _18 _19
+        _20 _21 _22 _23
+        _24 _25 _26 _27
+        _28 _29 _30 _31
+    }
 }
 
 vector_lane! {
@@ -1160,6 +1197,21 @@ macro_rules! cast {
     }};
 }
 
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+struct Optional<T>(Option<T>);
+
+impl<T: Decode> Decode for Optional<T> {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        match u32::decode(file)? {
+            0 => Ok(Self(None)),
+            1 => Ok(Self(Some(T::decode(file)?))),
+            _ => Err(invalid_data("too many items in vector"))
+        }
+    }
+}
+
+type OptionalValueType = Optional<ValueType>;
+
 instruction! {
     // Control Instructions
     ("unreachable",    Unreachable) => 0x00 code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Trap)),
@@ -1178,11 +1230,12 @@ instruction! {
             cntx
         )
     }),
+
     ("call",                  Call) => 0x10 (Function) code: Call,
     ("call_indirect", CallIndirect) => 0x11 (Table, Type) code: Call,
 
     // Reference Instructions
-    const ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull,
+    const ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull, // FIXME heaptype
     const ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::NULL),
     const ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
 
@@ -1190,7 +1243,7 @@ instruction! {
     // // Parametric Instructions
     ("drop",         Drop) => 0x1a code: Drop,
     ("select",     Select) => 0x1b code: Select,
-    // ("select_t*", SelectT) => 0x1c (WasmVec<ValueType>),
+    ("select_t*", SelectT) => 0x1c (OptionalValueType) code: Select,
     //
     // Variable Instructions
     ("local.get",   LocalGet) => 0x20 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Get) }>(PhantomData),
@@ -1252,8 +1305,8 @@ instruction! {
         }
     }),
 
-    // ("memory.init", MemoryInit) => 0xFC -> 8 (DataIndex, NullByte),
-    // ("data.drop",     DataDrop) => 0xFC -> 9 (DataIndex),
+    ("memory.init", MemoryInit) => 0xFC -> 8 (Data, NullByte) code: MemoryInit,
+    // ("data.drop",     DataDrop) => 0xFC -> 9 (Data),
     // ("memory.copy", MemoryCopy) => 0xFC -> 10 (NullByte, NullByte),
     // ("memory.fill", MemoryFill) => 0xFC -> 11 (NullByte),
 
@@ -1468,25 +1521,36 @@ instruction! {
 
     // ## Vector Constant
     const ("v128.const", V128Const) => 0xfd -> 12 (u128) code: immediate!(u128),
-    //
-    // // ## Vector Shuffle
-    // ("v128.shuffle", V128Shuffle) => 0xfd -> 13 ([Vector8x16Lane; 16]),
+
+    // ## Vector Shuffle
+    ("i8x16.shuffle", V128Shuffle) => 0xfd -> 13 (ShuffleArg) code: Primitive::ok(|shuffle: &ShuffleArg, (v1, v2): (u128, u128)| {
+        let mut combined = [0u8; 32];
+        combined[..16].copy_from_slice(&v1.to_le_bytes());
+        combined[16..].copy_from_slice(&v2.to_le_bytes());
+
+        let mut result = [0u8; 16];
+        for (i, &lane) in shuffle.iter().enumerate() {
+            result[i] = combined[lane as usize];
+        }
+
+        u128::from_le_bytes(result)
+    }),
     //
     // // ## Vector Lane Manipulation
-    // ("i8x16.extract_lane_s", I8x16ExtractLane) => 0xfd -> 21 ([Vector8x16Lane; 16]),
-    // ("i8x16.extract_lane_u", U8x16ExtractLane) => 0xfd -> 22 ([Vector8x16Lane; 16]),
-    // ("i8x16.replace_lane",   I8x16ReplaceLane) => 0xfd -> 23 ([Vector8x16Lane; 16]),
-    // ("i16x8.extract_lane_s", I16x8ExtractLane) => 0xfd -> 24 ([Vector16x8Lane; 16]),
-    // ("i16x8.extract_lane_u", U16x8ExtractLane) => 0xfd -> 25 ([Vector16x8Lane; 16]),
-    // ("i16x8.replace_lane",   I16x8ReplaceLane) => 0xfd -> 26 ([Vector16x8Lane; 16]),
-    // ("i32x4.extract_lane",   I32x4ExtractLane) => 0xfd -> 27 ([Vector32x4Lane; 16]),
-    // ("i32x4.replace_lane",   I32x4ReplaceLane) => 0xfd -> 28 ([Vector32x4Lane; 16]),
-    // ("i64x2.extract_lane",   I64x2ExtractLane) => 0xfd -> 29 ([Vector64x2Lane; 16]),
-    // ("i64x2.replace_lane",   I64x2ReplaceLane) => 0xfd -> 30 ([Vector64x2Lane; 16]),
-    // ("f32x4.extract_lane",   F32x4ExtractLane) => 0xfd -> 31 ([Vector32x4Lane; 16]),
-    // ("f32x4.replace_lane",   F32x4ReplaceLane) => 0xfd -> 32 ([Vector32x4Lane; 16]),
-    // ("f64x2.extract_lane",   F64x2ExtractLane) => 0xfd -> 33 ([Vector64x2Lane; 16]),
-    // ("f64x2.replace_lane",   F64x2ReplaceLane) => 0xfd -> 34 ([Vector64x2Lane; 16]),
+    // ("i8x16.extract_lane_s", I8x16ExtractLane) => 0xfd -> 21 (Vector8x16Lane),
+    // ("i8x16.extract_lane_u", U8x16ExtractLane) => 0xfd -> 22 (Vector8x16Lane),
+    // ("i8x16.replace_lane",   I8x16ReplaceLane) => 0xfd -> 23 (Vector8x16Lane),
+    // ("i16x8.extract_lane_s", I16x8ExtractLane) => 0xfd -> 24 (Vector16x8Lane),
+    // ("i16x8.extract_lane_u", U16x8ExtractLane) => 0xfd -> 25 (Vector16x8Lane),
+    // ("i16x8.replace_lane",   I16x8ReplaceLane) => 0xfd -> 26 (Vector16x8Lane),
+    // ("i32x4.extract_lane",   I32x4ExtractLane) => 0xfd -> 27 (Vector32x4Lane),
+    // ("i32x4.replace_lane",   I32x4ReplaceLane) => 0xfd -> 28 (Vector32x4Lane),
+    // ("i64x2.extract_lane",   I64x2ExtractLane) => 0xfd -> 29 (Vector64x2Lane),
+    // ("i64x2.replace_lane",   I64x2ReplaceLane) => 0xfd -> 30 (Vector64x2Lane),
+    // ("f32x4.extract_lane",   F32x4ExtractLane) => 0xfd -> 31 (Vector32x4Lane),
+    // ("f32x4.replace_lane",   F32x4ReplaceLane) => 0xfd -> 32 (Vector32x4Lane),
+    // ("f64x2.extract_lane",   F64x2ExtractLane) => 0xfd -> 33 (Vector64x2Lane),
+    // ("f64x2.replace_lane",   F64x2ReplaceLane) => 0xfd -> 34 (Vector64x2Lane),
     //
     // ("i8x16.swizzle",   I8x16Swizzle) => 0xfd -> 14,
     // ("i8x16.splat",       I8x16Splat) => 0xfd -> 15,
@@ -1568,10 +1632,10 @@ instruction! {
     // ### v128
     ("v128.not",             V128Not) => 0xfd -> 77 code: arithmetic!(i128; not),
     ("v128.and",             V128And) => 0xfd -> 78 code: arithmetic!(i128; and),
-    // ("v128.andnot",       V128AndNot) => 0xfd -> 79,
+    ("v128.andnot",       V128AndNot) => 0xfd -> 79 code: in_out!(a: i128, b: i128; (a & !b)),
     ("v128.or",               V128Or) => 0xfd -> 80 code: arithmetic!(i128; or),
     ("v128.xor",             V128Xor) => 0xfd -> 81 code: arithmetic!(i128; xor),
-    // ("v128.bitselect", V128BitSelect) => 0xfd -> 82,
+    ("v128.bitselect", V128BitSelect) => 0xfd -> 82 code: in_out!(a: i128, b: i128, c: i128; (c & b) | (!c & a)),
     ("v128.any_true",    V128AnyTrue) => 0xfd -> 83 code: compare!(a: i128; a != 0),
     //
     //

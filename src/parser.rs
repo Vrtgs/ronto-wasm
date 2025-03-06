@@ -108,12 +108,6 @@ impl<E: Enum> Decode for E {
     }
 }
 
-macro_rules! discard {
-    ($type: ty) => {
-        _
-    };
-}
-
 macro_rules! filter_discard {
     ($([$ident: ident])*) => { Self { $($ident),* } };
     ([_] $($tt:tt)*) => { filter_discard!($($tt)*) };
@@ -945,7 +939,10 @@ impl Decode for WasmBinary {
     }
 }
 
+pub(crate) fn decode(mut reader: ReadTape<impl Read>) -> Result<WasmBinary> {
+    WasmBinary::decode(&mut reader)
+}
+
 pub fn parse_file(file: impl Read) -> Result<WasmBinary> {
-    let mut file = ReadTape::new(file);
-    WasmBinary::decode(&mut file)
+    decode(ReadTape::new(file))
 }
