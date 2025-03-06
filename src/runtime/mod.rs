@@ -1,11 +1,11 @@
-use crate::instruction::{ExecutionError, FunctionInput, FunctionOutput};
+use crate::instruction::ExecutionError;
 use crate::parser::{Data, DataIndex, Element, ExportDescription, Expression, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, InitMode, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TableValue, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
 use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
+use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack as _};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
-use std::any::type_name;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -19,6 +19,7 @@ use std::{io, iter};
 use thiserror::Error;
 
 pub mod memory_buffer;
+pub mod parameter;
 
 #[derive(Debug, Copy, Clone)]
 pub enum ReferenceValue {
@@ -74,13 +75,12 @@ impl Value {
     }
 }
 
-pub trait ValueInner: Pod + Send + Sync + Debug {
-    const r#TYPE: ValueType;
+pub(crate) trait ValueInner: Pod + Send + Sync + Debug {
+    const TYPE: ValueType;
 
     fn into(self) -> Value;
     fn from(data: Value) -> Option<Self>;
     fn from_ref(data: &Value) -> Option<&Self>;
-    fn from_mut(data: &mut Value) -> Option<&mut Self>;
 }
 
 macro_rules! execute_expr {
@@ -101,7 +101,7 @@ macro_rules! execute_expr {
 macro_rules! impl_numeric_value {
     ($($variant: ident => $ty:ty $(; $uty: ty)?),+ $(,)?) => {$(
         impl ValueInner for $ty {
-            const r#TYPE: ValueType = ValueType::NumericType(NumericType::$variant);
+            const TYPE: ValueType = ValueType::NumericType(NumericType::$variant);
 
             fn into(self) -> Value {
                 Value::$variant(self)
@@ -120,18 +120,10 @@ macro_rules! impl_numeric_value {
                     _ => None
                 }
             }
-
-
-            fn from_mut(data: &mut Value) -> Option<&mut Self> {
-                match data {
-                    Value::$variant(inner) => Some(inner),
-                    _ => None
-                }
-            }
         }
         $(
         impl ValueInner for $uty {
-            const r#TYPE: ValueType = <$ty as ValueInner>::r#TYPE;
+            const TYPE: ValueType = <$ty as ValueInner>::TYPE;
 
             fn into(self) -> Value {
                 Value::$variant(self as $ty)
@@ -144,10 +136,6 @@ macro_rules! impl_numeric_value {
             fn from_ref(data: &Value) -> Option<&Self> {
                 <$ty as ValueInner>::from_ref(data).map(bytemuck::must_cast_ref)
             }
-
-            fn from_mut(data: &mut Value) -> Option<&mut Self> {
-                <$ty as ValueInner>::from_mut(data).map(bytemuck::must_cast_mut)
-            }
         }
         )?
     )+};
@@ -156,7 +144,7 @@ macro_rules! impl_numeric_value {
 macro_rules! impl_reference_value {
     ($($variant:ident => $ty:ty),+ $(,)?) => {$(
         impl ValueInner for $ty {
-            const r#TYPE: ValueType = ValueType::ReferenceType(ReferenceType::$variant);
+            const TYPE: ValueType = ValueType::ReferenceType(ReferenceType::$variant);
 
             fn into(self) -> Value {
                 Value::Ref(ReferenceValue::$variant(self))
@@ -175,14 +163,6 @@ macro_rules! impl_reference_value {
                     _ => None
                 }
             }
-
-
-            fn from_mut(data: &mut Value) -> Option<&mut Self> {
-                match data {
-                    Value::Ref(ReferenceValue::$variant(inner)) => Some(inner),
-                    _ => None
-                }
-            }
         }
     )+};
 }
@@ -196,7 +176,7 @@ impl_numeric_value! {
 }
 
 impl ValueInner for Index {
-    const r#TYPE: ValueType = <u32 as ValueInner>::r#TYPE;
+    const TYPE: ValueType = <u32 as ValueInner>::TYPE;
 
     fn into(self) -> Value {
         <u32 as ValueInner>::into(self.0)
@@ -208,10 +188,6 @@ impl ValueInner for Index {
 
     fn from_ref(data: &Value) -> Option<&Self> {
         <u32 as ValueInner>::from_ref(data).map(bytemuck::must_cast_ref)
-    }
-
-    fn from_mut(data: &mut Value) -> Option<&mut Self> {
-        <u32 as ValueInner>::from_mut(data).map(bytemuck::must_cast_mut)
     }
 }
 
@@ -902,11 +878,8 @@ impl WasmVirtualMachine {
 
         if !T::subtype(&r#type.parameters) || !U::subtype(&r#type.result) {
             panic!(
-                "call type mismatch, expected {:?} -> {:?}, found {} -> {}",
-                r#type.parameters,
-                r#type.result,
-                type_name::<T>(),
-                type_name::<U>()
+                "call type mismatch, expected {type}, found {}",
+                parameter::fmt_fn_signature::<T, U>()
             )
         }
 
@@ -1133,10 +1106,8 @@ impl<'a> Validator<'a> {
             stack.clear();
             return false;
         }
-        stack
-            .drain(stack.len() - data.len()..)
-            .rev()
-            .eq(data.iter().copied())
+
+        stack.drain(stack.len() - data.len()..).eq(data.iter().copied())
     }
 }
 

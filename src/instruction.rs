@@ -1,11 +1,14 @@
 use crate::parser::{BlockType, DataIndex, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::{MemoryError, MemoryFault};
+use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
+use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::runtime::{ReferenceValue, StackFrame, Validator, Value, ValueInner, WasmContext};
 use crate::vector::{Index, WasmVec};
 use crate::{invalid_data, Stack};
 use bytemuck::Pod;
 use std::convert::Infallible;
+use std::fmt::Display;
 use std::io::{Read, Result};
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
@@ -278,172 +281,6 @@ Primitive<Data, In, Out, F>
             data: PhantomData,
         }
     }
-}
-
-// static CURRENT_INSTRUCTIONS: Mutex<Vec<Instruction>> = Mutex::new(vec![]);
-
-
-// TODO make param trait
-
-pub trait FunctionInput: Sized + 'static {
-    fn validate(validator: &mut Validator) -> bool;
-    fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
-    fn get(stack: &mut Vec<Value>) -> Self {
-        let prev = format!("{stack:?}");
-        Self::get_checked(stack).unwrap_or_else(|| {
-            // let arr = &**CURRENT_INSTRUCTIONS.lock().unwrap();
-            // let arr = arr.iter().rev().map(|instr| instr.name()).take(10).rev().collect::<Vec<_>>();
-            panic!("{prev} validation should make sure we never get a value from the stack if it doesn't exist, or has a masimatched type")
-        })
-    }
-    fn into_input(self) -> Vec<Value>;
-    fn subtype(ty: &[ValueType]) -> bool;
-}
-
-pub trait FunctionOutput: Sized + 'static {
-    fn update_validator(validator: &mut Validator);
-    fn push(self, stack: &mut Vec<Value>);
-    fn get_output(stack: &mut Vec<Value>) -> Option<Self>;
-    fn subtype(ty: &[ValueType]) -> bool;
-}
-
-impl FunctionInput for () {
-    fn validate(_: &mut Validator) -> bool {
-        true
-    }
-
-    fn get_checked(_: &mut Vec<Value>) -> Option<Self> {
-        Some(())
-    }
-
-    fn get(_: &mut Vec<Value>) -> Self {}
-
-    fn into_input(self) -> Vec<Value> {
-        vec![]
-    }
-
-    fn subtype(ty: &[ValueType]) -> bool {
-        ty.is_empty()
-    }
-}
-
-impl FunctionOutput for () {
-    fn update_validator(_: &mut Validator) {}
-    fn push(self, _: &mut Vec<Value>) {}
-    fn get_output(_: &mut Vec<Value>) -> Option<Self> {
-        Some(())
-    }
-
-    fn subtype(ty: &[ValueType]) -> bool {
-        ty.is_empty()
-    }
-}
-
-impl FunctionOutput for Infallible {
-    fn update_validator(validator: &mut Validator) {
-        validator.set_unreachable()
-    }
-
-    fn push(self, _: &mut Vec<Value>) {
-        match self {}
-    }
-
-    fn get_output(_: &mut Vec<Value>) -> Option<Self> {
-        unreachable!()
-    }
-
-    fn subtype(_: &[ValueType]) -> bool {
-        true
-    }
-}
-
-impl<T: ValueInner> FunctionOutput for T {
-    fn update_validator(validator: &mut Validator) {
-        validator.push(T::r#TYPE)
-    }
-
-    fn push(self, stack: &mut Vec<Value>) {
-        stack.push(self.into())
-    }
-
-    fn get_output(stack: &mut Vec<Value>) -> Option<Self> {
-        FunctionInput::get_checked(stack)
-    }
-
-    fn subtype(ty: &[ValueType]) -> bool {
-        ty == [T::r#TYPE]
-    }
-}
-
-impl<T: ValueInner> FunctionInput for T {
-    fn validate(validator: &mut Validator) -> bool {
-        validator.pop().is_some_and(|t| t == T::r#TYPE)
-    }
-    fn get_checked(context: &mut Vec<Value>) -> Option<Self> {
-        context.pop().and_then(T::from)
-    }
-
-    fn into_input(self) -> Vec<Value> {
-        vec![self.into()]
-    }
-
-    fn subtype(ty: &[ValueType]) -> bool {
-        ty == [T::r#TYPE]
-    }
-}
-
-macro_rules! impl_param_for_tuple {
-    ($(($($T:literal),+ $(,)?))+) => {paste::paste! {
-        $(
-        impl<$([<T $T>]: ValueInner),*> FunctionOutput for ($([<T $T>]),+,) {
-            fn update_validator(validator: &mut Validator) {
-                validator.push_n([$([<T $T>]::r#TYPE),+]);
-            }
-
-            fn push(self, context: &mut Vec<Value>) {
-                context.push_n([$(self.$T.into()),+]);
-            }
-
-            fn get_output(stack: &mut Vec<Value>) -> Option<Self> {
-                FunctionInput::get_checked(stack)
-            }
-
-            fn subtype(ty: &[ValueType]) -> bool {
-                <Self as FunctionInput>::subtype(ty)
-            }
-        }
-
-        impl<$([<T $T>]: ValueInner),*> FunctionInput for ($([<T $T>]),+,) {
-            fn validate(validator: &mut Validator) -> bool {
-                validator.pop_n().is_some_and(|arr| arr == [ $([<T $T>]::r#TYPE),*])
-            }
-
-            fn get_checked(context: &mut Vec<Value>) -> Option<Self> {
-                let [$( [<t $T>] ),+] = context.pop_n()?;
-                Some(($([<T $T>]::from([<t $T>])?),+,))
-            }
-
-            fn into_input(self) -> Vec<Value> {
-                vec![$(self.$T.into()),+]
-            }
-
-            fn subtype(ty: &[ValueType]) -> bool {
-                ty == [$([<T $T>]::r#TYPE),+]
-            }
-        }
-        )+
-    }};
-}
-
-impl_param_for_tuple! {
-    (0, 1)
-    (0, 1, 2)
-    (0, 1, 2, 3)
-    (0, 1, 2, 3, 4)
-    (0, 1, 2, 3, 4, 5)
-    (0, 1, 2, 3, 4, 5, 6)
-    (0, 1, 2, 3, 4, 5, 6, 7)
-    (0, 1, 2, 3, 4, 5, 6, 7, 8)
 }
 
 pub trait InstructionCode<Data> {

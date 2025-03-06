@@ -51,9 +51,9 @@ pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::
 
 #[cfg(test)]
 mod tests {
-    use crate::instruction::{FunctionInput, FunctionOutput};
     use crate::parse_file;
     use crate::runtime::memory_buffer::MemoryBuffer;
+    use crate::runtime::parameter::{FunctionInput, FunctionOutput};
     use crate::runtime::WasmVirtualMachine;
     use crate::vector::Index;
     use base64::prelude::BASE64_STANDARD;
@@ -136,6 +136,12 @@ mod tests {
         test("select_t", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64)?;
         test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 1_i32), 9.11_f64)?;
         test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 0_i32), 69.0_f64)
+    }
+
+    #[test]
+    #[should_panic(expected = "call type mismatch")]
+    fn mismatched_type() {
+        test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7.0_f64).unwrap()
     }
 
     #[test]

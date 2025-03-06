@@ -363,6 +363,21 @@ decodable! {
     }
 }
 
+impl Display for ValueType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let ty = match self {
+            ValueType::NumericType(NumericType::I32) => "i32",
+            ValueType::NumericType(NumericType::I64) => "i64",
+            ValueType::NumericType(NumericType::F32) => "f32",
+            ValueType::NumericType(NumericType::F64) => "f64",
+            ValueType::NumericType(NumericType::V128) => "v128",
+            ValueType::ReferenceType(ReferenceType::Function) => "funcref",
+            ValueType::ReferenceType(ReferenceType::Extern) => "externref",
+        };
+        f.write_str(ty)
+    }
+}
+
 #[derive(Debug)]
 pub struct WithLength<T>(pub T);
 
@@ -402,6 +417,37 @@ decodable! {
     #[derive(Debug)]
     struct TypeSection {
         functions: WasmVec<TypeInfo>,
+    }
+}
+
+pub(crate) fn fmt_ty_vec(f: &mut Formatter, ty_vec: &[ValueType]) -> std::fmt::Result {
+    match ty_vec {
+        [] => f.write_str("()"),
+        [ty] => Display::fmt(ty, f),
+        params => {
+            let mut tuple = f.debug_tuple("");
+
+            struct DisplayDebug<T>(T);
+
+            impl<T: Display> Debug for DisplayDebug<T> {
+                fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                    T::fmt(&self.0, f)
+                }
+            }
+
+            for param in params {
+                tuple.field(&DisplayDebug(param));
+            }
+            tuple.finish()
+        }
+    }
+}
+
+impl Display for TypeInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        fmt_ty_vec(f, &self.parameters)?;
+        f.write_str(" -> ")?;
+        fmt_ty_vec(f, &self.result)
     }
 }
 
@@ -518,7 +564,7 @@ impl Decode for Element {
             _ => ElementKind::decode(file)?,
         };
         let init = match flags {
-            0x00 | 0x01 | 0x02 | 0x03 => {
+            0x00..=0x03 => {
                 WasmVec::<FunctionIndex>::decode(file)?.map(Expression::function_call)
             }
             _ => WasmVec::<Expression>::decode(file)?,
