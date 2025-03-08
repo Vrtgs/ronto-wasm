@@ -1,12 +1,9 @@
+use crate::instruction::Expression;
 use crate::read_tape::ReadTape;
 use std::any::type_name;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::{Read, Result};
 use std::marker::PhantomData;
-
-fn vector_from_vec<T>(vec: Vec<T>) -> Result<WasmVec<T>> {
-    WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
-}
 
 macro_rules! expect {
     ($condition:expr, $($errmsg:tt)*) => {
@@ -420,29 +417,6 @@ decodable! {
     }
 }
 
-pub(crate) fn fmt_ty_vec(f: &mut Formatter, ty_vec: &[ValueType]) -> std::fmt::Result {
-    match ty_vec {
-        [] => f.write_str("()"),
-        [ty] => Display::fmt(ty, f),
-        params => {
-            let mut tuple = f.debug_tuple("");
-
-            struct DisplayDebug<T>(T);
-
-            impl<T: Display> Debug for DisplayDebug<T> {
-                fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                    T::fmt(&self.0, f)
-                }
-            }
-
-            for param in params {
-                tuple.field(&DisplayDebug(param));
-            }
-            tuple.finish()
-        }
-    }
-}
-
 impl Display for TypeInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         fmt_ty_vec(f, &self.parameters)?;
@@ -771,120 +745,10 @@ decodable! {
     }
 }
 
-pub use crate::instruction::Instruction;
 use crate::invalid_data;
-use crate::runtime::{ReferenceValue, Value, WasmVirtualMachine};
-use crate::vector::{Index, WasmVec};
+use crate::runtime::parameter::fmt_ty_vec;
+use crate::vector::{vector_from_vec, Index, WasmVec};
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
-pub enum BlockType {
-    Empty,
-    Type(ValueType),
-    TypeIndex(TypeIndex),
-}
-
-impl Decode for BlockType {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let byte = file.peek_byte()?;
-        if byte == 0x40 {
-            file.read_byte()?;
-            Ok(BlockType::Empty)
-        } else if byte > 0x40 && byte < 0x80 {
-            Ok(BlockType::Type(ValueType::decode(file)?))
-        } else {
-            Ok(BlockType::TypeIndex(TypeIndex::decode(file)?))
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum IfElseBlock {
-    If(Expression),
-    IfElse(Expression, Expression),
-}
-
-const INSTRUCTION_ELSE: u8 = 0x05;
-const INSTRUCTION_END: u8 = 0x0B;
-
-impl Decode for IfElseBlock {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let mut ifso = vec![];
-
-        while !matches!(file.peek_byte()?, INSTRUCTION_ELSE | INSTRUCTION_END) {
-            ifso.push(Instruction::decode(file)?);
-        }
-        let byte = file.read_byte()?;
-
-        let ifso = Expression {
-            instructions: vector_from_vec(ifso)?,
-        };
-        match byte {
-            INSTRUCTION_ELSE => {
-                let ifnot = Expression::decode(file)?;
-                Ok(IfElseBlock::IfElse(ifso, ifnot))
-            }
-            INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
-            _ => unreachable!(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Expression {
-    pub instructions: WasmVec<Instruction>,
-}
-
-impl Expression {
-    pub fn const_eval(&self, vm: &WasmVirtualMachine) -> Option<Value> {
-        let [instruction] = &*self.instructions else {
-            return None;
-        };
-
-        Some(match *instruction {
-            Instruction::I32Const(val) => Value::I32(val),
-            Instruction::I64Const(val) => Value::I64(val),
-            Instruction::F32Const(val) => Value::F32(val),
-            Instruction::F64Const(val) => Value::F64(val),
-            Instruction::V128Const(val) => Value::V128(val as i128),
-            Instruction::RefNull(ReferenceType::Extern) => {
-                Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
-            }
-            Instruction::RefNull(ReferenceType::Function) => {
-                Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
-            }
-            Instruction::RefFunc(func) => Value::Ref(ReferenceValue::Function(func)),
-            // TODO: only allow imported globals
-            Instruction::GlobalGet(glob) => vm.load_global(glob)?,
-            _ => {
-                assert!(!instruction.const_available());
-                return None;
-            }
-        })
-    }
-}
-
-impl Expression {
-    fn function_call(idx: FunctionIndex) -> Self {
-        Self {
-            instructions: WasmVec::from_trusted_box(Box::new([Instruction::RefFunc(idx)])),
-        }
-    }
-}
-
-impl Decode for Expression {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let mut instructions = vec![];
-
-        while file.peek_byte()? != INSTRUCTION_END {
-            instructions.push(Instruction::decode(file)?);
-        }
-        let _ = file.read_byte();
-
-        Ok(Expression {
-            instructions: vector_from_vec(instructions)?,
-        })
-    }
-}
 
 #[derive(Debug)]
 #[non_exhaustive]

@@ -15,8 +15,6 @@ pub use runtime::WasmVirtualMachine;
 
 pub(crate) trait Stack<T> {
     fn pop_n<const N: usize>(&mut self) -> Option<[T; N]>;
-
-    fn push_n<const N: usize>(&mut self, data: [T; N]);
 }
 
 impl<T> Stack<T> for Vec<T> {
@@ -39,10 +37,6 @@ impl<T> Stack<T> for Vec<T> {
             Some(ret.assume_init())
         }
     }
-
-    fn push_n<const N: usize>(&mut self, data: [T; N]) {
-        self.extend(data)
-    }
 }
 
 pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
@@ -54,7 +48,7 @@ mod tests {
     use crate::parse_file;
     use crate::runtime::memory_buffer::MemoryBuffer;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-    use crate::runtime::WasmVirtualMachine;
+    use crate::runtime::{CallError, GetFunctionError, WasmVirtualMachine};
     use crate::vector::Index;
     use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
@@ -91,57 +85,66 @@ mod tests {
         function: &str,
         input: In,
         expected_output: Out,
-    ) -> io::Result<()> {
-        let vm = get_vm(path)?;
-        let output = vm.call_by_name::<In, Out>(function, input).unwrap();
-        assert_eq!(output, expected_output);
-        Ok(())
+    ) -> Result<(), CallError> {
+        let vm = get_vm(path).unwrap();
+        vm.call_by_name::<In, Out>(function, input).map(|output| {
+            assert_eq!(output, expected_output)
+        })
     }
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn fib() -> io::Result<()> {
-        test("fib", "fib", 24_i32, 75025_i64)
+    fn fib() {
+        test("fib", "fib", 24_i32, 75025_i64).unwrap();
     }
 
     #[test]
-    fn factorial() -> io::Result<()> {
-        test("factorial", "fac", 5.0_f64, 120.0_f64)
+    #[cfg_attr(miri, ignore)]
+    fn fib_rust() {
+        test("fib-rust", "fib", 24_i32, 75025_i64).unwrap();
+    }
+
+
+    #[test]
+    fn factorial() {
+        test("factorial", "fac", 5.0_f64, 120.0_f64).unwrap();
     }
 
     #[test]
-    fn rust_factorial() -> io::Result<()> {
-        test("rust-factorial", "factorial", 5_i32, 120_i64)
+    fn rust_factorial() {
+        test("rust-factorial", "factorial", 5_i32, 120_i64).unwrap();
     }
 
     #[test]
-    fn to_double_digits() -> io::Result<()> {
+    fn to_double_digits() {
         test(
             "to_double_digit",
             "to_double_digit",
             ('7' as u32, '8' as u32),
             78_u32,
-        )
+        ).unwrap();
     }
 
     #[test]
-    fn double_args() -> io::Result<()> {
-        test("test_double_arguments", "first_arg", (7_u32, 8_u32), 7_u32)?;
-        test("test_double_arguments", "second_arg", (7_u32, 8_u32), 8_u32)
+    fn double_args() {
+        test("test_double_arguments", "first_arg", (7_u32, 8_u32), 7_u32).unwrap();
+        test("test_double_arguments", "second_arg", (7_u32, 8_u32), 8_u32).unwrap();
     }
 
     #[test]
-    fn select_t() -> io::Result<()> {
-        test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64)?;
-        test("select_t", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64)?;
-        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 1_i32), 9.11_f64)?;
-        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 0_i32), 69.0_f64)
+    fn select_t() {
+        test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64).unwrap();
+        test("select_t", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64).unwrap();
+        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 1_i32), 9.11_f64).unwrap();
+        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 0_i32), 69.0_f64).unwrap()
     }
 
     #[test]
-    #[should_panic(expected = "call type mismatch")]
     fn mismatched_type() {
-        test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7.0_f64).unwrap()
+        assert!(matches!(
+            test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7.0_f64),
+            Err(CallError::GetFunctionError(GetFunctionError::MismatchedType(_),))
+        ))
     }
 
     #[test]
@@ -174,6 +177,13 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Debug, Copy, Clone, Pod, Zeroable)]
+    #[repr(C)]
+    struct Bytes {
+        ptr: Index,
+        len: Index,
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn base64_encode() -> io::Result<()> {
@@ -181,7 +191,7 @@ mod tests {
         let mem = vm.get_memory_by_name("memory").unwrap();
 
         let data = std::array::from_fn::<_, 12, _>(|i| {
-            let extra = usize::from((getrandom::u32().unwrap() >> 22) as u16);
+            let extra = usize::from((getrandom::u32().unwrap() >> 16) as u16);
             let size = i + extra;
             let mut bytes = Box::new_uninit_slice(size);
             getrandom::fill_uninit(&mut bytes).unwrap();
@@ -192,13 +202,6 @@ mod tests {
         for original in data {
             let ptr = mem.place_bytes(&original).unwrap();
             let len = Index::from_usize(original.len());
-
-            #[derive(Debug, Copy, Clone, Pod, Zeroable)]
-            #[repr(C)]
-            struct Bytes {
-                ptr: Index,
-                len: Index,
-            }
 
             let result_location = mem.place(&Bytes::zeroed()).unwrap();
 
@@ -216,6 +219,56 @@ mod tests {
 
         Ok(())
     }
+
+    // fn png_decode_inner() -> io::Result<()> {
+    //     let vm = get_vm("decode_image")?;
+    //     let mem = vm.get_memory_by_name("memory").unwrap();
+    //
+    //     for image in std::fs::read_dir("./test-files/assets/images")? {
+    //         let image = image?.path();
+    //         let image_bytes = std::fs::read(image)?;
+    //         let image = image::load_from_memory(&image_bytes).unwrap();
+    //
+    //         let ptr = mem.place_bytes(&image_bytes).unwrap();
+    //         let len = Index::from_usize(image_bytes.len());
+    //         drop(image_bytes);
+    //
+    //         #[derive(Debug, Copy, Clone, Pod, Zeroable)]
+    //         #[repr(C)]
+    //         struct Image {
+    //             width: u32,
+    //             height: u32,
+    //             bytes: Bytes,
+    //         }
+    //
+    //         let result_location = mem.place(&Image::zeroed()).unwrap();
+    //
+    //         vm.call_by_name::<(Index, Index, Index), ()>(
+    //             "decode_image",
+    //             (result_location, ptr, len),
+    //         )
+    //             .unwrap();
+    //
+    //         let result_image = mem.load::<Image>(result_location).unwrap();
+    //         assert_eq!((result_image.width, result_image.height), image.dimensions());
+    //
+    //         let bytes = mem.load_bytes(result_image.bytes.ptr, result_image.bytes.len).unwrap();
+    //         assert_eq!(&*bytes, image.as_bytes())
+    //     }
+    //
+    //     Ok(())
+    // }
+    //
+    // #[test]
+    // #[cfg_attr(miri, ignore)]
+    // fn png_decode() -> io::Result<()> {
+    //     std::thread::Builder::new()
+    //         .stack_size(10 * 1024 * 1024)
+    //         .spawn(png_decode_inner)?
+    //         .join()
+    //         .unwrap()
+    // }
+
 
     // TODO: actually run the tests
     #[test]

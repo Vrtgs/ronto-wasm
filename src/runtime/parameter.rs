@@ -1,10 +1,10 @@
-use crate::parser;
 use crate::parser::ValueType;
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::{Validator, Value, ValueInner};
 use crate::Stack;
 use std::convert::Infallible;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+use std::iter;
 use std::marker::PhantomData;
 
 trait Parameter: Sized + 'static {
@@ -12,9 +12,7 @@ trait Parameter: Sized + 'static {
 
     fn from_stack(stack: &mut Vec<Value>) -> Option<Self>;
 
-    fn into_values(self) -> Vec<Value>;
-
-    fn push(self, stack: &mut Vec<Value>);
+    fn into_values(self) -> impl IntoIterator<Item=Value>;
 }
 
 pub(crate) mod sealed {
@@ -47,9 +45,33 @@ pub(crate) mod sealed {
     }
 }
 
+pub(crate) fn fmt_ty_vec(f: &mut Formatter, ty_vec: &[ValueType]) -> std::fmt::Result {
+    match ty_vec {
+        [] => f.write_str("()"),
+        [ty] => Display::fmt(ty, f),
+        params => {
+            let mut tuple = f.debug_tuple("");
+
+            struct DisplayDebug<T>(T);
+
+            impl<T: Display> Debug for DisplayDebug<T> {
+                fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                    T::fmt(&self.0, f)
+                }
+            }
+
+            for param in params {
+                tuple.field(&DisplayDebug(param));
+            }
+            tuple.finish()
+        }
+    }
+}
+
+
 impl<T: Parameter> sealed::ArgumentFmt for T {
     fn fmt_args(f: &mut Formatter) -> std::fmt::Result {
-        parser::fmt_ty_vec(f, T::TYPE)
+        fmt_ty_vec(f, T::TYPE)
     }
 }
 
@@ -102,11 +124,9 @@ impl Parameter for () {
         Some(())
     }
 
-    fn into_values(self) -> Vec<Value> {
-        vec![]
+    fn into_values(self) -> impl IntoIterator<Item=Value> {
+        iter::empty()
     }
-
-    fn push(self, _: &mut Vec<Value>) {}
 }
 
 impl sealed::ArgumentFmt for Infallible {
@@ -140,12 +160,8 @@ impl<T: ValueInner> Parameter for T {
         stack.pop().and_then(T::from)
     }
 
-    fn into_values(self) -> Vec<Value> {
-        vec![self.into()]
-    }
-
-    fn push(self, stack: &mut Vec<Value>) {
-        stack.push(self.into())
+    fn into_values(self) -> impl IntoIterator<Item=Value> {
+        iter::once(self.into())
     }
 }
 
@@ -174,12 +190,8 @@ macro_rules! impl_param_for_tuple {
                 Some(($([<T $T>]::from([<t $T>])?),+,))
             }
 
-            fn into_values(self) -> Vec<Value> {
-                vec![$(self.$T.into()),+]
-            }
-
-            fn push(self, stack: &mut Vec<Value>) {
-                stack.push_n([$(self.$T.into()),+]);
+            fn into_values(self) -> impl IntoIterator<Item=Value> {
+                [$(self.$T.into()),+]
             }
         }
         )+

@@ -227,18 +227,42 @@ impl MemoryBuffer {
 
     pub(crate) fn fill(
         &self,
-        memory_argument: impl MemoryArgument,
         addr: Index,
         size: Index,
         byte: u8,
     ) -> Result<(), MemoryFault> {
-        access!(&mut self.buffer, memory_argument, addr, size.as_usize(); |bytes: &mut [u8]| {
+        access!(&mut self.buffer, UnalignedAccess, addr, size.as_usize(); |bytes: &mut [u8]| {
             // Safety:
             // slices are perfectly valid for reads and writes for |slice| and are always aligned
             // and u8 ... is a valid layout for u8
             unsafe { std::ptr::write_bytes(bytes.as_mut_ptr(), byte, size_of_val(bytes)) }
         })
     }
+
+    pub(crate) fn copy(
+        &self,
+        src: Index,
+        dest: Index,
+        n: Index,
+    ) -> Result<(), MemoryFault> {
+        let buffer = &mut **self.buffer.borrow_mut();
+
+        let src_start = src;
+        assign_or_fault!(src_end = src.0.checked_add(n.0).map(Index));
+
+        if src_end.as_usize() > buffer.len() {
+            return Err(MemoryFault::new());
+        }
+
+        let count = Index(src_end.0 - src_start.0);
+        if dest.as_usize() <= buffer.len() - count.as_usize() {
+            return Err(MemoryFault::new());
+        }
+
+        buffer.copy_within(src.as_usize()..src_end.as_usize(), dest.as_usize());
+        Ok(())
+    }
+
 
     pub fn init(&self, offset: Index, data: &[u8]) -> Result<(), MemoryFault> {
         access!(&mut self.buffer, UnalignedAccess, offset, data.len(); |bytes: &mut [u8]| {

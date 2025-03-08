@@ -1,17 +1,17 @@
-use crate::parser::{BlockType, DataIndex, Decode, Expression, ExternIndex, FunctionIndex, GlobalIndex, IfElseBlock, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType};
+use crate::parser::{DataIndex, Decode, ExternIndex, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::{MemoryError, MemoryFault};
-use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
-use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-use crate::runtime::{ReferenceValue, StackFrame, Validator, Value, ValueInner, WasmContext};
-use crate::vector::{Index, WasmVec};
-use crate::{invalid_data, Stack};
-use bytemuck::Pod;
+use crate::runtime::{ReferenceValue, Value, WasmContext};
+use crate::vector::{vector_from_vec, Index, WasmVec};
+use crate::{invalid_data, WasmVirtualMachine};
 use std::convert::Infallible;
-use std::fmt::Display;
-use std::io::{Read, Result};
+use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
+
+mod instruction_code;
+
+use instruction_code::{access_type, AccessType, Block, Branch, BranchTable, Break, Call, CastingMemoryAccess, Conditional, Drop, IfBlock, InstructionCode, Loop, MemoryAccess, MemoryInit, Primitive, RefNull, Select, Unconditional, VariableAccess};
 
 type Extern = ExternIndex;
 type Function = FunctionIndex;
@@ -24,6 +24,7 @@ type Local = LocalIndex;
 
 type Global = GlobalIndex;
 type NullByte = TagByte<0x00>;
+type NullByte0 = NullByte;
 
 type ShuffleArg = [Vector8x32Lane; 16];
 
@@ -131,12 +132,12 @@ macro_rules! instruction {
     ),+ $(,)?) => {
         #[derive(Debug, PartialEq, Clone)]
         #[non_exhaustive]
-        pub enum Instruction {
+        enum Instruction {
             $($ident $(($($data),*))? ),+
         }
 
         impl Decode for Instruction {
-            fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+            fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
                 let first_byte = file.read_byte()?;
 
                 normalize_match_single!(match ((first_byte, )) {
@@ -156,13 +157,13 @@ macro_rules! instruction {
                              Ok(Self::$ident $(($(<$data>::decode(file)?),*))?)
                         },
                     )+}
-                    {_ => Err(invalid_data(format!("invalid instruction (0x{first_byte:02x}, 0x{second_opcode:02x})")))}
+                    {_ => Err(invalid_data(format!("invalid instruction (0x{first_byte:02x}, {second_opcode})")))}
                 })
             }
         }
 
         impl Instruction {
-            pub fn const_available(&self) -> bool {
+            fn const_available(&self) -> bool {
                 macro_rules! is_const {
                     (const) => {true};
                     (     ) => {false};
@@ -173,22 +174,7 @@ macro_rules! instruction {
                 }
             }
 
-            pub fn validate(&self, validator: &mut Validator) -> bool {
-                #[allow(non_snake_case)]
-                match self {
-                    $(Self::$ident$(($($data),*))? => {
-                        let primitive = &const { $code };
-                        #[allow(unused_parens)]
-                        InstructionCode::<($(($(&$data),*))?)>::validate(primitive, ($(($($data),*))?), validator)
-                    },)+
-                }
-            }
-
-            pub fn execute(&self, context: &mut WasmContext) -> ExecutionResult {
-                // CURRENT_INSTRUCTIONS.lock().unwrap().push(self.clone());
-
-                // static FIRST_TRAP: AtomicBool = AtomicBool::new(true);
-
+            fn execute(&self, context: &mut WasmContext) -> ExecutionResult {
                 #[allow(non_snake_case)]
                 let ret = match self {
                     $(Self::$ident$(($($data),*))? => {
@@ -198,14 +184,10 @@ macro_rules! instruction {
                     },)+
                 };
 
-                // if matches!(ret, Err(ExecutionError::Trap)) && FIRST_TRAP.swap(false, Ordering::Relaxed) {
-                //     dbg!(self);
-                // }
-
                 ret
             }
 
-            pub fn name(&self) -> &'static str {
+            fn name(&self) -> &'static str {
                 // Warn on duplicate name
                 if false {
                     #[forbid(unreachable_patterns)]
@@ -224,19 +206,6 @@ macro_rules! instruction {
     };
 }
 
-// Same safety as `std::mem::transmute`
-// but it can transmute between generically sized arrays
-// to [T; N] -> [U; N] assuming T is a valid layout of U
-unsafe fn transmute_any<Src: Copy, Dst: Copy>(src: Src) -> Dst {
-    const { assert!(size_of::<Src>() == size_of::<Dst>()) }
-    union Transmute<Src: Copy, Dst: Copy> {
-        from: Src,
-        to: Dst,
-    }
-
-    unsafe { Transmute { from: src }.to }
-}
-
 #[derive(Debug)]
 pub enum ExecutionError {
     Unwind(Label),
@@ -249,566 +218,7 @@ impl From<MemoryFault> for ExecutionError {
     }
 }
 
-pub type ExecutionResult<T = ()> = std::result::Result<T, ExecutionError>;
-
-struct Primitive<Data, In, Out, F> {
-    f: F,
-    data: PhantomData<fn(Data, In, &mut WasmContext) -> Out>,
-}
-
-impl<Data, In, Out, F: Fn(Data, In) -> Out> Primitive<Data, In, Out, F> {
-    pub const fn ok(
-        f: F,
-    ) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
-        Primitive::new(move |data, input| Ok(f(data, input)))
-    }
-}
-
-impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In, Out, F> {
-    pub const fn new(
-        f: F,
-    ) -> Primitive<Data, In, Out, impl Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> {
-        Primitive::full(move |data, input, _| f(data, input))
-    }
-}
-
-impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-Primitive<Data, In, Out, F>
-{
-    pub const fn full(f: F) -> Self {
-        Self {
-            f,
-            data: PhantomData,
-        }
-    }
-}
-
-pub trait InstructionCode<Data> {
-    fn validate(&self, data: Data, validator: &mut Validator) -> bool;
-    fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult;
-}
-
-impl<
-    Data,
-    In: FunctionInput,
-    Out: FunctionOutput,
-    F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>,
-> InstructionCode<Data> for Primitive<Data, In, Out, F>
-{
-    fn validate(&self, _: Data, validator: &mut Validator) -> bool {
-        let res = In::validate(validator);
-        if res {
-            Out::update_validator(validator)
-        }
-        res
-    }
-
-    fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult {
-        let input = In::get(context.stack);
-        (self.f)(data, input, context).map(|x| Out::push(x, context.stack))
-    }
-}
-
-macro_rules! flag {
-    ($name: ident { $flag_name: ident }; true = $truthy: ident; false = $falsy: ident) => {
-        trait $name {
-            const $flag_name: bool;
-        }
-        struct $truthy;
-        struct $falsy;
-        impl $name for $truthy {
-            const $flag_name: bool = true;
-        }
-
-        impl $name for $falsy {
-            const $flag_name: bool = false;
-        }
-    };
-}
-
-flag!(BlockBranchBehavior { LOOP_BACK }; true = Loop; false = Break);
-
-struct Block<T>(PhantomData<T>);
-
-impl<T: BlockBranchBehavior> InstructionCode<(&BlockType, &Expression)> for Block<T> {
-    fn validate(&self, _: (&BlockType, &Expression), _: &mut Validator) -> bool {
-        todo!()
-    }
-
-    fn call(
-        &self,
-        (&r#type, expr): (&BlockType, &Expression),
-        context: &mut WasmContext,
-    ) -> ExecutionResult {
-        'block: loop {
-            let return_address = Index::from_usize(context.stack.len());
-            context.stack_frames.push(StackFrame {
-                return_amount: match r#type {
-                    BlockType::Empty => Index::ZERO,
-                    BlockType::Type(_) => Index(if T::LOOP_BACK { 0 } else { 1 }),
-                    BlockType::TypeIndex(idx) => {
-                        let break_val = match T::LOOP_BACK {
-                            false => context.get_type_output(idx),
-                            true => context.get_type_input(idx),
-                        };
-                        Index::from_usize(break_val.unwrap().len())
-                    }
-                },
-                return_address,
-            });
-
-            for instruction in expr.instructions.iter() {
-                match instruction.execute(context) {
-                    Ok(()) => (),
-                    Err(ExecutionError::Trap) => return Err(ExecutionError::Trap),
-                    Err(ExecutionError::Unwind(LabelIndex(Index(0)))) => match T::LOOP_BACK {
-                        true => continue 'block,
-                        false => break 'block Ok(()),
-                    },
-                    Err(ExecutionError::Unwind(LabelIndex(Index(up @ 1..)))) => {
-                        return Err(ExecutionError::Unwind(LabelIndex(Index(up - 1))));
-                    }
-                }
-            }
-
-            return Ok(());
-        }
-    }
-}
-
-flag!(BranchBehavior { CONDITIONAL }; true = Conditional; false = Unconditional);
-
-struct IfBlock;
-
-impl InstructionCode<(&BlockType, &IfElseBlock)> for IfBlock {
-    fn validate(&self, _: (&BlockType, &IfElseBlock), validator: &mut Validator) -> bool {
-        u32::validate(validator)
-    }
-
-    fn call(
-        &self,
-        (_, expr): (&BlockType, &IfElseBlock),
-        context: &mut WasmContext,
-    ) -> ExecutionResult {
-        let (if_so, if_not) = match expr {
-            IfElseBlock::If(expr) => (&*expr.instructions, &[][..]),
-            IfElseBlock::IfElse(if_so, if_not) => (&*if_so.instructions, &*if_not.instructions),
-        };
-
-        let instr = match i32::get(context.stack) {
-            0 => if_not,
-            _ => if_so,
-        };
-
-        instr.iter().try_for_each(|i| i.execute(context))
-    }
-}
-
-struct Branch<T>(PhantomData<T>);
-
-impl<T: BranchBehavior> InstructionCode<&Label> for Branch<T> {
-    fn validate(&self, &label: &Label, _: &mut Validator) -> bool {
-        todo!()
-    }
-
-    fn call(&self, &label: &Label, context: &mut WasmContext) -> ExecutionResult {
-        if T::CONDITIONAL && i32::get(context.stack) == 0 {
-            return Ok(());
-        }
-
-        let label_offset = label.0.0;
-        let index = Index(Index::from_usize(context.stack_frames.len()).0 - label_offset - 1);
-
-        let return_frame = context
-            .stack_frames
-            .drain(index.as_usize()..)
-            .next()
-            .expect("invalid label passed");
-
-        let stack_start = return_frame.return_address.as_usize();
-        let stack_end =
-            Index(Index::from_usize(context.stack.len()).0 - return_frame.return_amount.0)
-                .as_usize();
-
-        context.stack.drain(stack_start..stack_end);
-
-        Err(ExecutionError::Unwind(label))
-    }
-}
-
-struct BranchTable;
-
-impl InstructionCode<(&Labels, &Label)> for BranchTable {
-    fn validate(&self, (labels, fallback): (&Labels, &Label), validator: &mut Validator) -> bool {
-        labels
-            .iter()
-            .chain([fallback])
-            .all(|&label| validator.contains_label(label))
-            && i32::validate(validator)
-    }
-
-    fn call(
-        &self,
-        (labels, &fallback): (&Labels, &Label),
-        context: &mut WasmContext,
-    ) -> ExecutionResult {
-        let idx = Index::get(context.stack);
-        let label = match labels.get(idx) {
-            Some(&label) => label,
-            None => fallback,
-        };
-        InstructionCode::call(&Branch(PhantomData::<Unconditional>), &label, context)
-    }
-}
-
-struct Drop;
-impl InstructionCode<()> for Drop {
-    fn validate(&self, (): (), validator: &mut Validator) -> bool {
-        validator.pop().is_some()
-    }
-
-    fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
-        let _ = context.pop().unwrap();
-        Ok(())
-    }
-}
-
-struct Select;
-impl InstructionCode<()> for Select {
-    fn validate(&self, (): (), validator: &mut Validator) -> bool {
-        i32::validate(validator) && validator.pop_n()
-            .is_some_and(|[a, b]| a == b && !matches!(a, ValueType::ReferenceType(_)))
-    }
-
-    fn call(&self, (): (), context: &mut WasmContext) -> ExecutionResult {
-        let [val1, val2, cond] = context.pop_n().unwrap();
-        let value = match cond {
-            Value::I32(0) => val2,
-            Value::I32(_) => val1,
-            _ => unreachable!()
-        };
-        context.push(value);
-        Ok(())
-    }
-}
-
-impl InstructionCode<&OptionalValueType> for Select {
-    fn validate(&self, &ty: &OptionalValueType, validator: &mut Validator) -> bool {
-        let Some(ty) = ty.0 else {
-            return Select::validate(self, (), validator);
-        };
-        i32::validate(validator) && validator.pop_n().is_some_and(|[a, b]| ty == b && a == ty)
-    }
-
-    fn call(&self, _: &OptionalValueType, context: &mut WasmContext) -> ExecutionResult {
-        Select::call(self, (), context)
-    }
-}
-
-struct RefNull;
-
-impl InstructionCode<&ReferenceType> for RefNull {
-    fn validate(&self, ref_ty: &ReferenceType, validator: &mut Validator) -> bool {
-        match ref_ty {
-            ReferenceType::Function => Function::update_validator(validator),
-            ReferenceType::Extern => Extern::update_validator(validator),
-        }
-        true
-    }
-
-    fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
-        context.push(Value::Ref(match ref_ty {
-            ReferenceType::Function => ReferenceValue::Function(Function::NULL),
-            ReferenceType::Extern => ReferenceValue::Extern(Extern::NULL),
-        }));
-        Ok(())
-    }
-}
-
-struct Call;
-
-impl InstructionCode<&Function> for Call {
-    fn validate(&self, &func: &Function, validator: &mut Validator) -> bool {
-        validator.simulate_call(func)
-    }
-
-    fn call(&self, &func: &Function, context: &mut WasmContext) -> ExecutionResult {
-        let func = context.get_function(func).unwrap();
-        match context.call(func) {
-            Ok(()) => Ok(()),
-            Err(()) => Err(ExecutionError::Trap),
-        }
-    }
-}
-
-impl InstructionCode<(&Table, &Type)> for Call {
-    fn validate(&self, _: (&Table, &Type), _: &mut Validator) -> bool {
-        todo!()
-    }
-
-    fn call(
-        &self,
-        (&table_idx, &expected_ty): (&Table, &Type),
-        context: &mut WasmContext,
-    ) -> ExecutionResult {
-        let idx = Index::get(context.stack);
-        let ReferenceValue::Function(func_idx) = context.table_load(table_idx, idx).unwrap() else {
-            unreachable!();
-        };
-
-        let func = context.get_function(func_idx).ok_or(ExecutionError::Trap)?;
-
-        if func.r#type != expected_ty {
-            return Err(ExecutionError::Trap);
-        }
-
-        match context.call(func) {
-            Ok(()) => Ok(()),
-            Err(()) => Err(ExecutionError::Trap),
-        }
-    }
-}
-
-trait VariableIndex: Copy {
-    fn exists(self, validator: &mut Validator) -> bool;
-    fn mutable(self, validator: &mut Validator) -> bool;
-    fn r#type(self, validator: &mut Validator) -> ValueType;
-    fn load(self, context: &mut WasmContext) -> Value;
-    fn store(self, value: Value, context: &mut WasmContext);
-}
-
-impl VariableIndex for Local {
-    fn exists(self, validator: &mut Validator) -> bool {
-        validator.get_local(self).is_some()
-    }
-
-    fn mutable(self, _: &mut Validator) -> bool {
-        true
-    }
-
-    fn r#type(self, validator: &mut Validator) -> ValueType {
-        // `exists` should always run before `type`
-        validator.get_local(self).unwrap()
-    }
-
-    fn load(self, context: &mut WasmContext) -> Value {
-        // due to validation, we exist
-        *context.get_local(self).unwrap()
-    }
-
-    fn store(self, value: Value, context: &mut WasmContext) {
-        // due to validation, we exist
-        *context.get_local(self).unwrap() = value
-    }
-}
-
-impl VariableIndex for Global {
-    fn exists(self, validator: &mut Validator) -> bool {
-        validator.get_global(self).is_some()
-    }
-
-    fn mutable(self, validator: &mut Validator) -> bool {
-        // `exists` should always run before `mutable`
-        validator.get_global(self).unwrap().mutable
-    }
-
-    fn r#type(self, validator: &mut Validator) -> ValueType {
-        // `exists` should always run before `type`
-        validator.get_global(self).unwrap().value_type
-    }
-
-    fn load(self, context: &mut WasmContext) -> Value {
-        // due to validation, we exist
-        context.virtual_machine.load_global(self).unwrap()
-    }
-
-    fn store(self, value: Value, context: &mut WasmContext) {
-        // due to validation, we exist and are mutable
-        context.virtual_machine.store_global(self, value).unwrap()
-    }
-}
-
-enum AccessType {
-    Get = 0,
-    Set = 1,
-    Tee = 2,
-}
-
-macro_rules! access_type {
-    (@fetch $lit:expr) => {
-        const {
-            match $lit {
-                0 => AccessType::Get,
-                1 => AccessType::Set,
-                2 => AccessType::Tee,
-                _ => unreachable!(),
-            }
-        }
-    };
-    ($lit:expr) => {
-        const { $lit as usize }
-    };
-}
-
-struct VariableAccess<I, const A: usize>(PhantomData<[I; A]>);
-
-impl<I: VariableIndex, const A: usize> InstructionCode<&I> for VariableAccess<I, A> {
-    fn validate(&self, &index: &I, validator: &mut Validator) -> bool {
-        let exists = index.exists(validator);
-        let mut has_valid_signature = move || {
-            let index_ty = index.r#type(validator);
-            let valid_stack = match access_type!(@fetch A) {
-                AccessType::Get => {
-                    validator.push(index_ty);
-                    return true;
-                }
-                AccessType::Set => validator.pop().is_some_and(|ty| ty == index_ty),
-                AccessType::Tee => validator.peek().is_some_and(|&ty| ty == index_ty),
-            };
-
-            valid_stack && index.mutable(validator)
-        };
-
-        exists && has_valid_signature()
-    }
-
-    fn call(&self, &index: &I, context: &mut WasmContext) -> ExecutionResult {
-        match access_type!(@fetch A) {
-            AccessType::Get => {
-                let value = index.load(context);
-                context.push(value);
-            }
-            AccessType::Set => {
-                let value = context.pop().unwrap();
-                index.store(value, context)
-            }
-            AccessType::Tee => {
-                let value = *context.peek().unwrap();
-                index.store(value, context)
-            }
-        }
-        Ok(())
-    }
-}
-
-struct MemoryAccess<T, const A: usize>(PhantomData<[T; A]>);
-
-impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryAccess<T, A> {
-    fn validate(&self, &_: &MemoryArgument, validator: &mut Validator) -> bool {
-        match access_type!(@fetch A) {
-            AccessType::Get => {
-                let res = u32::validate(validator);
-                if res {
-                    T::update_validator(validator)
-                };
-                res
-            }
-            AccessType::Set => T::validate(validator) && u32::validate(validator),
-            AccessType::Tee => {
-                let res = T::validate(validator) && u32::validate(validator);
-                if res {
-                    T::update_validator(validator)
-                }
-                res
-            }
-        }
-    }
-
-    fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
-        match access_type!(@fetch A) {
-            AccessType::Get => {
-                let index = Index::get(context.stack);
-                let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
-                context.push(value.into());
-            }
-            AccessType::Set => {
-                let value = context.pop().and_then(T::from).unwrap();
-                let index = Index::get(context.stack);
-                context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
-            }
-            AccessType::Tee => {
-                let index = Index::get(context.stack);
-                let value = context.peek().and_then(T::from_ref).unwrap();
-                context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-trait Extend<T: ValueInner>: Pod {
-    fn extend(from: Self) -> T;
-    fn narrow(from: T) -> Self;
-}
-
-struct CastingMemoryAccess<T, E, const A: usize>(PhantomData<[(T, E); A]>);
-
-macro_rules! impl_extend {
-    ($(Extend<$ty:ty> for $small:ty)*) => {$(
-        // https://doc.rust-lang.org/reference/expressions/operator-expr.html#type-cast-expressions
-        // this works perfectly as long as we just extend from smaller
-        // because to smaller always truncates
-        // and smaller to bigger depends on the smaller type
-        const _: () = assert!(<$small>::BITS < <$ty>::BITS);
-
-        impl Extend<$ty> for $small {
-            fn extend(from: Self) -> $ty {
-                from as $ty
-            }
-
-            fn narrow(from: $ty) -> Self {
-                from as $small
-            }
-        }
-    )*};
-    ($($ty:ty)*) => {impl_extend!{
-        $(Extend<i32> for $ty Extend<i64> for $ty)*
-    }};
-}
-
-impl_extend!(i8 u8 i16 u16);
-impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
-
-impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-for CastingMemoryAccess<T, E, A>
-{
-    #[inline(always)]
-    fn validate(&self, mem_arg: &MemoryArgument, validator: &mut Validator) -> bool {
-        MemoryAccess::<T, A>::validate(&MemoryAccess(PhantomData), mem_arg, validator)
-    }
-
-    fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
-        match access_type!(@fetch A) {
-            AccessType::Get => {
-                let index = Index::get(context.stack);
-                let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
-                context.push(E::extend(value).into());
-            }
-            AccessType::Set => {
-                let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
-                let index = Index::get(context.stack);
-                context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
-            }
-            AccessType::Tee => unreachable!(),
-        }
-        Ok(())
-    }
-}
-
-struct MemoryInit;
-
-impl InstructionCode<(&Data, &NullByte)> for MemoryInit {
-    fn validate(&self, (&data, _): (&Data, &NullByte), _: &mut Validator) -> bool {
-        todo!()
-    }
-
-    fn call(&self, (&data, _): (&Data, &NullByte), context: &mut WasmContext) -> ExecutionResult {
-        let (mem_offset, data_offset, n) = <(Index, Index, Index)>::get(context.stack);
-
-        // context.mem_init(MemoryIndex::ZERO, mem_offset, data, data_offset, n).map_err(Into::into)
-        todo!()
-    }
-}
+pub type ExecutionResult<T = ()> = Result<T, ExecutionError>;
 
 macro_rules! vector_lane {
     (
@@ -826,7 +236,7 @@ macro_rules! vector_lane {
 
             impl [<Vector $bits x $count Lane>] {
                 #[inline(always)]
-                pub fn try_from_byte(byte: u8) -> Result<Self> {
+                pub fn try_from_byte(byte: u8) -> io::Result<Self> {
                     const { assert!(<[Self]>::len(&[Self::$first $(, Self::$rest)*]) == $count) };
 
                     match byte {
@@ -840,13 +250,13 @@ macro_rules! vector_lane {
 
             impl Decode for [<Vector $bits x $count Lane>] {
                 #[inline(always)]
-                fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+                fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
                     file.read_byte().and_then([<Vector $bits x $count Lane>]::try_from_byte)
                 }
             }
 
             impl<const N: usize> Decode for [ [<Vector $bits x $count Lane>] ; N] {
-                fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+                fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
                     let chunk = file.read_chunk::<N>()?;
                     for byte in chunk {
                         // this generates much less bloated llvm IR
@@ -855,6 +265,18 @@ macro_rules! vector_lane {
                             return Err(err)
                         }
                     }
+
+                    unsafe fn transmute_any<Src: Copy, Dst: Copy>(src: Src) -> Dst {
+                        const { assert!(size_of::<Src>() == size_of::<Dst>()) }
+
+                        union Transmute<Src: Copy, Dst: Copy> {
+                            from: Src,
+                            to: Dst
+                        }
+
+                        unsafe { Transmute { from: src }.to }
+                    }
+
                     // Safety: all bytes are valid vector lanes
                     Ok(unsafe { transmute_any(chunk) })
                 }
@@ -1035,10 +457,10 @@ macro_rules! cast {
 }
 
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-struct Optional<T>(Option<T>);
+pub struct Optional<T>(pub Option<T>);
 
 impl<T: Decode> Decode for Optional<T> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
         match u32::decode(file)? {
             0 => Ok(Self(None)),
             1 => Ok(Self(Some(T::decode(file)?))),
@@ -1049,10 +471,141 @@ impl<T: Decode> Decode for Optional<T> {
 
 type OptionalValueType = Optional<ValueType>;
 
+#[inline(always)]
+fn splat32(v: u32) -> u128 {
+    splat64(((v as u64) << 32) | v as u64)
+}
+
+#[inline(always)]
+fn splat64(v: u64) -> u128 {
+    ((v as u128) << 64) | v as u128
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Expression {
+    pub instructions: WasmVec<Instruction>,
+}
+
+impl Expression {
+    pub fn const_eval(&self, vm: &WasmVirtualMachine) -> Option<Value> {
+        let [instruction] = &*self.instructions else {
+            return None;
+        };
+
+        Some(match *instruction {
+            Instruction::I32Const(val) => Value::I32(val as u32),
+            Instruction::I64Const(val) => Value::I64(val as u64),
+            Instruction::F32Const(val) => Value::F32(val),
+            Instruction::F64Const(val) => Value::F64(val),
+            Instruction::V128Const(val) => Value::V128(val),
+            Instruction::RefNull(ReferenceType::Extern) => {
+                Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
+            }
+            Instruction::RefNull(ReferenceType::Function) => {
+                Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
+            }
+            Instruction::RefFunc(func) => Value::Ref(ReferenceValue::Function(func)),
+            // TODO: only allow imported globals
+            Instruction::GlobalGet(glob) => vm.load_global(glob)?,
+            _ => {
+                assert!(!instruction.const_available());
+                return None;
+            }
+        })
+    }
+
+    pub fn eval(&self, context: &mut WasmContext) -> Result<(), ()> {
+        for instruction in self.instructions.iter() {
+            match instruction.execute(context) {
+                Ok(()) => (),
+                Err(ExecutionError::Unwind(_)) => return Ok(()),
+                Err(ExecutionError::Trap) => return Err(()),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Expression {
+    pub fn function_call(idx: FunctionIndex) -> Self {
+        Self {
+            instructions: WasmVec::from_trusted_box(Box::new([Instruction::RefFunc(idx)])),
+        }
+    }
+}
+
+impl Decode for Expression {
+    fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
+        let mut instructions = vec![];
+
+        while file.peek_byte()? != INSTRUCTION_END {
+            instructions.push(Instruction::decode(file)?);
+        }
+        let _ = file.read_byte();
+
+        Ok(Expression {
+            instructions: vector_from_vec(instructions)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IfElseBlock {
+    If(Expression),
+    IfElse(Expression, Expression),
+}
+
+const INSTRUCTION_ELSE: u8 = 0x05;
+const INSTRUCTION_END: u8 = 0x0B;
+
+impl Decode for IfElseBlock {
+    fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
+        let mut ifso = vec![];
+
+        while !matches!(file.peek_byte()?, INSTRUCTION_ELSE | INSTRUCTION_END) {
+            ifso.push(Instruction::decode(file)?);
+        }
+        let byte = file.read_byte()?;
+
+        let ifso = Expression {
+            instructions: vector_from_vec(ifso)?,
+        };
+        match byte {
+            INSTRUCTION_ELSE => {
+                let ifnot = Expression::decode(file)?;
+                Ok(IfElseBlock::IfElse(ifso, ifnot))
+            }
+            INSTRUCTION_END => Ok(IfElseBlock::If(ifso)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+pub enum BlockType {
+    Empty,
+    Type(ValueType),
+    TypeIndex(TypeIndex),
+}
+
+impl Decode for BlockType {
+    fn decode(file: &mut ReadTape<impl Read>) -> io::Result<Self> {
+        let byte = file.peek_byte()?;
+        if byte == 0x40 {
+            file.read_byte()?;
+            Ok(BlockType::Empty)
+        } else if byte > 0x40 && byte < 0x80 {
+            Ok(BlockType::Type(ValueType::decode(file)?))
+        } else {
+            Ok(BlockType::TypeIndex(TypeIndex::decode(file)?))
+        }
+    }
+}
+
 instruction! {
     // Control Instructions
     ("unreachable",    Unreachable) => 0x00 code: Primitive::new(|(), ()| Err::<Infallible, _>(ExecutionError::Trap)),
-    ("nop",                    Nop) => 0x01 code: in_out!(nop: (); nop),
+    ("nop",                    Nop) => 0x01 code: Primitive::ok(|(), ()| ()),
     ("block",                Block) => 0x02 (BlockType, Expression) code: Block(PhantomData::<Break>),
     ("loop",                  Loop) => 0x03 (BlockType, Expression) code: Block(PhantomData::<Loop >),
     ("if",                     If)  => 0x04 (BlockType, IfElseBlock) code: IfBlock,
@@ -1143,14 +696,20 @@ instruction! {
     }),
 
     ("memory.init", MemoryInit) => 0xFC -> 8 (Data, NullByte) code: MemoryInit,
-    // ("data.drop",     DataDrop) => 0xFC -> 9 (Data),
-    // ("memory.copy", MemoryCopy) => 0xFC -> 10 (NullByte, NullByte),
-    // ("memory.fill", MemoryFill) => 0xFC -> 11 (NullByte),
+    ("data.drop",     DataDrop) => 0xFC -> 9 (Data) code: Primitive::ok(|_, ()| ()), // TODO: reclaim data
+    ("memory.copy", MemoryCopy) => 0xFC -> 10 (NullByte, NullByte0) code: Primitive::full(|_, (dest, src, n): (Index, Index, Index), ctx| {
+        ctx.mem_copy(MemoryIndex::ZERO, dest, src, n).map_err(Into::into)
+    }),
+    ("memory.fill", MemoryFill) => 0xFC -> 11 (NullByte)  code: Primitive::full(|_, (mem_offset, val, n): (Index, u32, Index), ctx| {
+        ctx.mem_fill(MemoryIndex::ZERO, mem_offset, val as u8, n).map_err(Into::into)
+    }),
 
 
     // # Numeric Instructions
 
     // ## Constants
+
+    /* instructions encode the constants as signed with zigzag encoding */
     const ("i32.const", I32Const) => 0x41 (i32) code: immediate!(i32),
     const ("i64.const", I64Const) => 0x42 (i64) code: immediate!(i64),
     const ("f32.const", F32Const) => 0x43 (f32) code: immediate!(f32),
@@ -1159,9 +718,9 @@ instruction! {
     // ## Equality
 
     // ### i32
-    ("i32.eqz", I32EqZ) => 0x45 code: eqz!(i32),
-    ("i32.eq",   I32Eq) => 0x46 code: cmp!(i32; ==),
-    ("i32.ne",   I32Ne) => 0x47 code: cmp!(i32; !=),
+    ("i32.eqz", I32EqZ) => 0x45 code: eqz!(u32),
+    ("i32.eq",   I32Eq) => 0x46 code: cmp!(u32; ==),
+    ("i32.ne",   I32Ne) => 0x47 code: cmp!(u32; !=),
     ("i32.lt_s", I32Lt) => 0x48 code: cmp!(i32; <),
     ("i32.lt_u", U32Lt) => 0x49 code: cmp!(u32; <),
     ("i32.gt_s", I32Gt) => 0x4a code: cmp!(i32; >),
@@ -1172,9 +731,9 @@ instruction! {
     ("i32.ge_u", U32Ge) => 0x4f code: cmp!(u32; >=),
 
     // ### i64
-    ("i64.eqz", I64EqZ) => 0x50 code: eqz!(i64),
-    ("i64.eq",   I64Eq) => 0x51 code: cmp!(i64; ==),
-    ("i64.ne",   I64Ne) => 0x52 code: cmp!(i64; !=),
+    ("i64.eqz", I64EqZ) => 0x50 code: eqz!(u64),
+    ("i64.eq",   I64Eq) => 0x51 code: cmp!(u64; ==),
+    ("i64.ne",   I64Ne) => 0x52 code: cmp!(u64; !=),
     ("i64.lt_s", I64Lt) => 0x53 code: cmp!(i64;  <),
     ("i64.lt_u", U64Lt) => 0x54 code: cmp!(u64;  <),
     ("i64.gt_s", I64Gt) => 0x55 code: cmp!(i64;  >),
@@ -1205,44 +764,44 @@ instruction! {
 
     // ### i32
 
-    ("i32.clz",       I32Clz) => 0x67 code: arithmetic!(i32; clz),
-    ("i32.ctz",       I32Ctz) => 0x68 code: arithmetic!(i32; ctz),
-    ("i32.popcnt", I32Popcnt) => 0x69 code: arithmetic!(i32; popcount),
-    ("i32.add",       I32Add) => 0x6a code: arithmetic!(i32;  add),
-    ("i32.sub",       I32Sub) => 0x6b code: arithmetic!(i32;  sub),
-    ("i32.mul",       I32Mul) => 0x6c code: arithmetic!(i32;  mul),
+    ("i32.clz",       I32Clz) => 0x67 code: arithmetic!(u32; clz),
+    ("i32.ctz",       I32Ctz) => 0x68 code: arithmetic!(u32; ctz),
+    ("i32.popcnt", I32Popcnt) => 0x69 code: arithmetic!(u32; popcount),
+    ("i32.add",       I32Add) => 0x6a code: arithmetic!(u32;  add),
+    ("i32.sub",       I32Sub) => 0x6b code: arithmetic!(u32;  sub),
+    ("i32.mul",       I32Mul) => 0x6c code: arithmetic!(u32;  mul),
     ("i32.div_s",     I32Div) => 0x6d code: arithmetic!(i32;  div),
     ("i32.div_u",     U32Div) => 0x6e code: arithmetic!(u32;  div),
     ("i32.rem_s",     I32Rem) => 0x6f code: arithmetic!(i32;  rem),
     ("i32.rem_u",     U32Rem) => 0x70 code: arithmetic!(u32;  rem),
-    ("i32.and",       I32And) => 0x71 code: arithmetic!(i32;  and),
-    ("i32.or",         I32Or) => 0x72 code: arithmetic!(i32;  or),
-    ("i32.xor",       I32Xor) => 0x73 code: arithmetic!(i32;  xor),
-    ("i32.shl",       I32Shl) => 0x74 code: arithmetic!(i32;  shl),
+    ("i32.and",       I32And) => 0x71 code: arithmetic!(u32;  and),
+    ("i32.or",         I32Or) => 0x72 code: arithmetic!(u32;  or),
+    ("i32.xor",       I32Xor) => 0x73 code: arithmetic!(u32;  xor),
+    ("i32.shl",       I32Shl) => 0x74 code: arithmetic!(u32;  shl),
     ("i32.shr_s",     I32Shr) => 0x75 code: arithmetic!(i32;  shr),
     ("i32.shr_u",    I32Shru) => 0x76 code: arithmetic!(u32;  shr),
-    ("i32.rotl",     I32Rotl) => 0x77 code: arithmetic!(i32; rotl),
-    ("i32.rotr",     I32Rotr) => 0x78 code: arithmetic!(i32; rotr),
+    ("i32.rotl",     I32Rotl) => 0x77 code: arithmetic!(u32; rotl),
+    ("i32.rotr",     I32Rotr) => 0x78 code: arithmetic!(u32; rotr),
 
     // ### i64
-    ("i64.clz",       I64Clz) => 0x79 code: arithmetic!(i64; clz),
-    ("i64.ctz",       I64Ctz) => 0x7a code: arithmetic!(i64; ctz),
-    ("i64.popcnt", I64Popcnt) => 0x7b code: arithmetic!(i64; popcount),
-    ("i64.add",       I64Add) => 0x7c code: arithmetic!(i64;  add),
-    ("i64.sub",       I64Sub) => 0x7d code: arithmetic!(i64;  sub),
-    ("i64.mul",       I64Mul) => 0x7e code: arithmetic!(i64;  mul),
+    ("i64.clz",       I64Clz) => 0x79 code: arithmetic!(u64; clz),
+    ("i64.ctz",       I64Ctz) => 0x7a code: arithmetic!(u64; ctz),
+    ("i64.popcnt", I64Popcnt) => 0x7b code: arithmetic!(u64; popcount),
+    ("i64.add",       I64Add) => 0x7c code: arithmetic!(u64;  add),
+    ("i64.sub",       I64Sub) => 0x7d code: arithmetic!(u64;  sub),
+    ("i64.mul",       I64Mul) => 0x7e code: arithmetic!(u64;  mul),
     ("i64.div_s",     I64Div) => 0x7f code: arithmetic!(i64;  div),
     ("i64.div_u",     U64Div) => 0x80 code: arithmetic!(u64;  div),
     ("i64.rem_s",     I64Rem) => 0x81 code: arithmetic!(i64;  rem),
     ("i64.rem_u",     U64Rem) => 0x82 code: arithmetic!(u64;  rem),
-    ("i64.and",       I64And) => 0x83 code: arithmetic!(i64;  and),
-    ("i64.or",         I64Or) => 0x84 code: arithmetic!(i64;  or),
-    ("i64.xor",       I64Xor) => 0x85 code: arithmetic!(i64;  xor),
-    ("i64.shl",       I64Shl) => 0x86 code: arithmetic!(i64;  shl),
+    ("i64.and",       I64And) => 0x83 code: arithmetic!(u64;  and),
+    ("i64.or",         I64Or) => 0x84 code: arithmetic!(u64;  or),
+    ("i64.xor",       I64Xor) => 0x85 code: arithmetic!(u64;  xor),
+    ("i64.shl",       I64Shl) => 0x86 code: arithmetic!(u64;  shl),
     ("i64.shr_s",     I64Shr) => 0x87 code: arithmetic!(i64;  shr),
     ("i64.shr_u",    I64Shru) => 0x88 code: arithmetic!(u64;  shr),
-    ("i64.rotl",     I64Rotl) => 0x89 code: arithmetic!(i64; rotl),
-    ("i64.rotr",     I64Rotr) => 0x8a code: arithmetic!(i64; rotr),
+    ("i64.rotl",     I64Rotl) => 0x89 code: arithmetic!(u64; rotl),
+    ("i64.rotr",     I64Rotr) => 0x8a code: arithmetic!(u64; rotr),
 
     // ### f32
     ("f32.abs",           F32Abs) => 0x8b code: arithmetic!(float f32; abs),
@@ -1279,6 +838,8 @@ instruction! {
 
     // Conversion
     ("i32.wrap_i64",               I32WrapI64) => 0xa7 code: cast!(u64 ==> u32),
+
+
     ("i32.trunc_f32_s",           I32TruncF32) => 0xa8 code: cast!(f32 ==> i32),
     ("i32.trunc_f32_u",           U32TruncF32) => 0xa9 code: cast!(f32 ==> u32),
     ("i32.trunc_f64_s",           I32TruncF64) => 0xaa code: cast!(f64 ==> i32),
@@ -1321,15 +882,19 @@ instruction! {
     ("i64.extend32_s", I64ExtendI32) => 0xC4 code: round_trip_cast!(i64 <==> i32),
 
     // ## Saturating Conversion
-    // ("i32.trunc_sat_f32_s", I32TruncSatF32) => 0xfc -> 0,
-    // ("i32.trunc_sat_f32_u", U32TruncSatF32) => 0xfc -> 1,
-    // ("i32.trunc_sat_f64_s", I32TruncSatF64) => 0xfc -> 2,
-    // ("i32.trunc_sat_f64_u", U32TruncSatF64) => 0xfc -> 3,
-    // ("i64.trunc_sat_f32_s", I64TruncSatF32) => 0xfc -> 4,
-    // ("i64.trunc_sat_f32_u", U64TruncSatF32) => 0xfc -> 5,
-    // ("i64.trunc_sat_f64_s", I64TruncSatF64) => 0xfc -> 6,
-    // ("i64.trunc_sat_f64_u", U64TruncSatF64) => 0xfc -> 7,
-    //
+
+    // these casts in rust, already define the edge cases
+    // https://doc.rust-lang.org/reference/expressions/operator-expr.html#type-cast-expressions
+    ("i32.trunc_sat_f32_s", I32TruncSatF32) => 0xfc -> 0 code: cast!(f32 ==> i32),
+    ("i32.trunc_sat_f32_u", U32TruncSatF32) => 0xfc -> 1 code: cast!(f32 ==> u32),
+    ("i32.trunc_sat_f64_s", I32TruncSatF64) => 0xfc -> 2 code: cast!(f64 ==> i32),
+    ("i32.trunc_sat_f64_u", U32TruncSatF64) => 0xfc -> 3 code: cast!(f64 ==> u32),
+
+    ("i64.trunc_sat_f32_s", I64TruncSatF32) => 0xfc -> 4 code: cast!(f32 ==> i64),
+    ("i64.trunc_sat_f32_u", U64TruncSatF32) => 0xfc -> 5 code: cast!(f32 ==> u64),
+    ("i64.trunc_sat_f64_s", I64TruncSatF64) => 0xfc -> 6 code: cast!(f64 ==> i64),
+    ("i64.trunc_sat_f64_u", U64TruncSatF64) => 0xfc -> 7 code: cast!(f64 ==> u64),
+
     // Vector Instructions
 
     // ## Vector Memory Instructions
@@ -1372,7 +937,7 @@ instruction! {
 
         u128::from_le_bytes(result)
     }),
-    //
+
     // // ## Vector Lane Manipulation
     // ("i8x16.extract_lane_s", I8x16ExtractLane) => 0xfd -> 21 (Vector8x16Lane),
     // ("i8x16.extract_lane_u", U8x16ExtractLane) => 0xfd -> 22 (Vector8x16Lane),
@@ -1388,14 +953,30 @@ instruction! {
     // ("f32x4.replace_lane",   F32x4ReplaceLane) => 0xfd -> 32 (Vector32x4Lane),
     // ("f64x2.extract_lane",   F64x2ExtractLane) => 0xfd -> 33 (Vector64x2Lane),
     // ("f64x2.replace_lane",   F64x2ReplaceLane) => 0xfd -> 34 (Vector64x2Lane),
-    //
-    // ("i8x16.swizzle",   I8x16Swizzle) => 0xfd -> 14,
-    // ("i8x16.splat",       I8x16Splat) => 0xfd -> 15,
-    // ("i16x8.splat",       I16x8Splat) => 0xfd -> 16,
-    // ("i32x4.splat",       I32x4Splat) => 0xfd -> 17,
-    // ("i64x2.splat",       I64x2Splat) => 0xfd -> 18,
-    // ("f32x4.splat",       F32x4Splat) => 0xfd -> 19,
-    // ("f64x2.splat",       F64x2Splat) => 0xfd -> 20,
+    
+    
+    ("i8x16.swizzle", I8x16Swizzle) => 0xfd -> 14 code: Primitive::ok(|(), (v1, v2): (u128, u128)| {
+        let mut result = [0u8; 16];
+        let bytes = v1.to_le_bytes();
+        let indices = v2.to_le_bytes();
+
+        for i in 0..16 {
+            let idx = indices[i] as usize;
+            result[i] = if idx < 16 { bytes[idx] } else { 0 };
+        }
+
+        u128::from_le_bytes(result)
+    }),
+
+    ("i8x16.splat", I8x16Splat) => 0xfd -> 15 code: Primitive::ok(|(), v: u32| u128::from_le_bytes([v as u8; 16])),
+    ("i16x8.splat", I16x8Splat) => 0xfd -> 16 code: Primitive::ok(|(), v: u32| {
+        let v = v as u16;
+        splat32(((v as u32) << 16) | v as u32)
+    }),
+    ("i32x4.splat", I32x4Splat) => 0xfd -> 17 code: Primitive::ok(|(), v: u32| splat32(v)),
+    ("i64x2.splat", I64x2Splat) => 0xfd -> 18 code: Primitive::ok(|(), v: u64| splat64(v)),
+    ("f32x4.splat", F32x4Splat) => 0xfd -> 19 code: Primitive::ok(|(), v: f32| splat32(v.to_bits())),
+    ("f64x2.splat", F64x2Splat) => 0xfd -> 20 code: Primitive::ok(|(), v: f64| splat64(v.to_bits())),
     //
     //
     // // ## Equality checks
@@ -1474,10 +1055,10 @@ instruction! {
     ("v128.xor",             V128Xor) => 0xfd -> 81 code: arithmetic!(i128; xor),
     ("v128.bitselect", V128BitSelect) => 0xfd -> 82 code: in_out!(a: i128, b: i128, c: i128; (c & b) | (!c & a)),
     ("v128.any_true",    V128AnyTrue) => 0xfd -> 83 code: compare!(a: i128; a != 0),
-    //
-    //
-    // // ## Numeric operations
-    //
+
+
+    // ## Numeric operations
+
     // // ### i8
     // ("i8x16.abs",                    I8x16Abs) => 0xfd ->  96,
     // ("i8x16.neg",                    I8x16Neg) => 0xfd ->  97,

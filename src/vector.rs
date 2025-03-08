@@ -1,3 +1,4 @@
+use crate::invalid_data;
 use crate::parser::Decode;
 use crate::read_tape::ReadTape;
 use std::cmp::Ordering;
@@ -14,6 +15,11 @@ use std::ptr::NonNull;
 )]
 #[repr(transparent)]
 pub struct Index(pub u32);
+
+pub(crate) fn vector_from_vec<T>(vec: Vec<T>) -> std::io::Result<WasmVec<T>> {
+    WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
+}
+
 
 impl Decode for Index {
     fn decode(file: &mut ReadTape<impl Read>) -> std::io::Result<Self> {
