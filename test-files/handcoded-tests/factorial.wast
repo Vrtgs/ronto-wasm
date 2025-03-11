@@ -3,14 +3,15 @@
     local.get 0
     f64.const 1
     f64.lt
-    if (result f64)
+    if
       f64.const 1
-    else
-      local.get 0
-      local.get 0
-      f64.const 1
-      f64.sub
-      call $fac
-      f64.mul
-    end)
+      return
+    end
+    local.get 0
+    local.get 0
+    f64.const 1
+    f64.sub
+    call $fac
+    f64.mul
+    )
 )

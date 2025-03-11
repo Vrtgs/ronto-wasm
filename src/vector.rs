@@ -16,13 +16,13 @@ use std::ptr::NonNull;
 #[repr(transparent)]
 pub struct Index(pub u32);
 
-pub(crate) fn vector_from_vec<T>(vec: Vec<T>) -> std::io::Result<WasmVec<T>> {
+pub(crate) fn vector_from_vec<T>(vec: Vec<T>) -> anyhow::Result<WasmVec<T>> {
     WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
 }
 
 
 impl Decode for Index {
-    fn decode(file: &mut ReadTape<impl Read>) -> std::io::Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         Ok(Index(u32::decode(file)?))
     }
 }
@@ -216,7 +216,7 @@ impl<T> Drop for WasmVec<T> {
 }
 
 impl<T: Decode> Decode for WasmVec<T> {
-    fn decode(file: &mut ReadTape<impl Read>) -> std::io::Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let len = u32::decode(file)?;
         (0..len)
             .map(|_| T::decode(file))

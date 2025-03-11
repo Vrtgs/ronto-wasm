@@ -1,8 +1,9 @@
-use crate::instruction::Expression;
+use crate::expression::Expression;
 use crate::read_tape::ReadTape;
+use anyhow::Result;
 use std::any::type_name;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{Read, Result};
+use std::io::Read;
 use std::marker::PhantomData;
 
 macro_rules! expect {
@@ -33,7 +34,7 @@ macro_rules! impl_decode_for_int {
         $(
             impl Decode for $ints {
                 fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-                    file.read_leb128()
+                    file.read_leb128().map_err(anyhow::Error::from)
                 }
             }
         )*
@@ -45,7 +46,7 @@ macro_rules! impl_decode_naive {
         $(
         impl Decode for $types {
             fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-                file.read_chunk().map(<$types>::from_le_bytes)
+                file.read_chunk().map(<$types>::from_le_bytes).map_err(anyhow::Error::from)
             }
         }
         )*
@@ -54,7 +55,7 @@ macro_rules! impl_decode_naive {
 
 impl Decode for u8 {
     fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        file.read_byte()
+        file.read_byte().map_err(anyhow::Error::from)
     }
 }
 
@@ -82,7 +83,7 @@ impl<T: Decode> Decode for PhantomData<T> {
     }
 }
 
-trait Enum: Sized {
+pub(crate) trait Enum: Sized {
     type Discriminant: Decode + Debug + Display + Copy + Clone + 'static;
     const VARIANTS: &'static [Self::Discriminant];
 
@@ -232,7 +233,7 @@ macro_rules! decodable {
             const VARIANTS: &[$type] = &[$($value),*];
 
             #[inline(always)]
-            fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
+            fn enum_try_decode(variant: $type, _file: &mut ReadTape<impl Read>) -> Option<anyhow::Result<Self>> {
                 match variant {
                     $(
                     $value => {
@@ -306,6 +307,8 @@ macro_rules! decodable {
         decodable! { $($next)* }
     };
 }
+
+pub(crate) use decodable;
 
 pub struct CustomSection(pub WasmVec<u8>);
 
@@ -442,9 +445,9 @@ decodable! {
         description: ImportDescription,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Copy, Clone)]
     struct TableType {
-        reftype: ValueType,
+        reftype: ReferenceType,
         limits: Limit,
     }
 
@@ -698,14 +701,8 @@ impl Decode for Limit {
 
 decodable! {
     #[derive(Debug)]
-    struct TableValue {
-        element_type: ReferenceType,
-        limits: Limit,
-    }
-
-    #[derive(Debug)]
     struct TableSection {
-        tables: WasmVec<TableValue>,
+        tables: WasmVec<TableType>,
     }
 
     #[derive(Debug)]
@@ -713,7 +710,7 @@ decodable! {
         memories: WasmVec<Limit>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Copy, Clone)]
     struct GlobalType {
         value_type: ValueType,
         mutable: bool,

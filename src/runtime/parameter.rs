@@ -1,6 +1,7 @@
+use crate::expression::ActiveCompilation;
 use crate::parser::ValueType;
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
-use crate::runtime::{Validator, Value, ValueInner};
+use crate::runtime::{Value, ValueInner};
 use crate::Stack;
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
@@ -16,8 +17,9 @@ trait Parameter: Sized + 'static {
 }
 
 pub(crate) mod sealed {
+    use crate::expression::ActiveCompilation;
     use crate::parser::ValueType;
-    use crate::runtime::{Validator, Value};
+    use crate::runtime::Value;
     use std::fmt::Formatter;
 
     pub trait ArgumentFmt: Sized + 'static {
@@ -25,7 +27,7 @@ pub(crate) mod sealed {
     }
 
     pub trait SealedInput: ArgumentFmt {
-        fn validate(validator: &mut Validator) -> bool;
+        fn get_from_compiler(compiler: &mut ActiveCompilation) -> bool;
         fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
         fn get(stack: &mut Vec<Value>) -> Self {
             let prev = format!("{stack:?}");
@@ -38,7 +40,7 @@ pub(crate) mod sealed {
     }
 
     pub trait SealedOutput: ArgumentFmt {
-        fn update_validator(validator: &mut Validator);
+        fn update_compiler(compiler: &mut ActiveCompilation);
         fn push(self, stack: &mut Vec<Value>);
         fn get_output(stack: &mut Vec<Value>) -> Option<Self>;
         fn subtype(ty: &[ValueType]) -> bool;
@@ -76,8 +78,8 @@ impl<T: Parameter> sealed::ArgumentFmt for T {
 }
 
 impl<T: Parameter> SealedInput for T {
-    fn validate(validator: &mut Validator) -> bool {
-        validator.pop_slice(T::TYPE)
+    fn get_from_compiler(compiler: &mut ActiveCompilation) -> bool {
+        compiler.pop_slice(T::TYPE).is_ok()
     }
 
     fn get_checked(stack: &mut Vec<Value>) -> Option<Self> {
@@ -94,8 +96,8 @@ impl<T: Parameter> SealedInput for T {
 }
 
 impl<T: Parameter> SealedOutput for T {
-    fn update_validator(validator: &mut Validator) {
-        validator.push_slice(T::TYPE)
+    fn update_compiler(compiler: &mut ActiveCompilation) {
+        compiler.push_slice(T::TYPE)
     }
 
     fn push(self, stack: &mut Vec<Value>) {
@@ -136,8 +138,8 @@ impl sealed::ArgumentFmt for Infallible {
 }
 
 impl SealedOutput for Infallible {
-    fn update_validator(validator: &mut Validator) {
-        validator.set_unreachable()
+    fn update_compiler(compiler: &mut ActiveCompilation) {
+        compiler.set_unreachable()
     }
 
     fn push(self, _: &mut Vec<Value>) {

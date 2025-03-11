@@ -4,7 +4,7 @@ use std::error::Error;
 use std::io;
 use std::mem::MaybeUninit;
 
-mod instruction;
+mod expression;
 pub mod parser;
 mod read_tape;
 pub mod runtime;
@@ -39,8 +39,8 @@ impl<T> Stack<T> for Vec<T> {
     }
 }
 
-pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, err)
+pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyhow::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err).into()
 }
 
 #[cfg(test)]
@@ -60,7 +60,7 @@ mod tests {
     use std::path::Path;
     use wasm_testsuite::data::SpecVersion;
 
-    fn get_vm(path: impl AsRef<Path>) -> io::Result<WasmVirtualMachine> {
+    fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<WasmVirtualMachine> {
         WasmVirtualMachine::new(parse_file(File::open(
             Path::new("./test-files/test-modules")
                 .join(path)
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn cstr() -> io::Result<()> {
+    fn cstr() -> anyhow::Result<()> {
         let vm = get_vm("test_cstr")?;
         let ptr = vm.call_by_name::<(), Index>("get_cstr", ()).unwrap();
         let mem = vm.get_memory_by_name("memory").unwrap();
@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn make_cstr() -> io::Result<()> {
+    fn make_cstr() -> anyhow::Result<()> {
         let vm = get_vm("make_cstr")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn base64_encode() -> io::Result<()> {
+    fn base64_encode() -> anyhow::Result<()> {
         let vm = get_vm("encode_base64")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
@@ -220,7 +220,7 @@ mod tests {
         Ok(())
     }
 
-    // fn png_decode_inner() -> io::Result<()> {
+    // fn png_decode_inner() -> anyhow::Result<()> {
     //     let vm = get_vm("decode_image")?;
     //     let mem = vm.get_memory_by_name("memory").unwrap();
     //
