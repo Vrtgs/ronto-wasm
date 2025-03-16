@@ -1,8 +1,10 @@
+#![allow(private_interfaces)]
+
+use crate::Stack;
 use crate::expression::ActiveCompilation;
 use crate::parser::ValueType;
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::{Value, ValueInner};
-use crate::Stack;
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::iter;
@@ -13,7 +15,7 @@ trait Parameter: Sized + 'static {
 
     fn from_stack(stack: &mut Vec<Value>) -> Option<Self>;
 
-    fn into_values(self) -> impl IntoIterator<Item=Value>;
+    fn into_values(self) -> impl IntoIterator<Item = Value>;
 }
 
 pub(crate) mod sealed {
@@ -70,7 +72,6 @@ pub(crate) fn fmt_ty_vec(f: &mut Formatter, ty_vec: &[ValueType]) -> std::fmt::R
     }
 }
 
-
 impl<T: Parameter> sealed::ArgumentFmt for T {
     fn fmt_args(f: &mut Formatter) -> std::fmt::Result {
         fmt_ty_vec(f, T::TYPE)
@@ -126,7 +127,7 @@ impl Parameter for () {
         Some(())
     }
 
-    fn into_values(self) -> impl IntoIterator<Item=Value> {
+    fn into_values(self) -> impl IntoIterator<Item = Value> {
         iter::empty()
     }
 }
@@ -162,7 +163,7 @@ impl<T: ValueInner> Parameter for T {
         stack.pop().and_then(T::from)
     }
 
-    fn into_values(self) -> impl IntoIterator<Item=Value> {
+    fn into_values(self) -> impl IntoIterator<Item = Value> {
         iter::once(self.into())
     }
 }

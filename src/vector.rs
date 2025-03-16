@@ -20,7 +20,6 @@ pub(crate) fn vector_from_vec<T>(vec: Vec<T>) -> anyhow::Result<WasmVec<T>> {
     WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
 }
 
-
 impl Decode for Index {
     fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         Ok(Index(u32::decode(file)?))
@@ -150,16 +149,6 @@ impl<T> DerefMut for WasmVec<T> {
         // Safety: self owns this pointer that was previously allocated by Box
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len.as_usize()) }
     }
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_out_of_bounds(index: Index, length: Index) -> ! {
-    panic!(
-        "index: {} out of bounds for WasmVec of length {}",
-        index.0, length.0
-    )
 }
 
 impl<T: Clone> Clone for WasmVec<T> {

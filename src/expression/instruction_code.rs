@@ -1,5 +1,8 @@
 use crate::expression::{ActiveCompilation, ExecutionResult};
-use crate::parser::{DataIndex, ExternIndex, FunctionIndex, GlobalIndex, LocalIndex, MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, ValueType};
+use crate::parser::{
+    DataIndex, ExternIndex, FunctionIndex, GlobalIndex, LocalIndex, MemoryArgument, MemoryIndex,
+    ReferenceType, TableIndex, TagByte, TypeIndex, ValueType,
+};
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::runtime::{ReferenceValue, Trap, Value, ValueInner, WasmContext};
@@ -54,7 +57,8 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
     }
 }
 
-impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>> Primitive<Data, In, Out, F>
+impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
+    Primitive<Data, In, Out, F>
 {
     pub(super) const fn full(f: F) -> Self {
         Self {
@@ -97,14 +101,22 @@ impl InstructionCode<&FunctionIndex> for Call {
     }
 }
 
-impl InstructionCode<(&TableIndex, &TypeIndex)> for Call {
-    fn validate(&self, (&table, &ty): (&TableIndex, &TypeIndex), comp: &mut ActiveCompilation) -> bool {
-        comp.get_table(table).is_some_and(|table| table.reftype == ReferenceType::Function) && comp.simulate_call_indirect(ty)
+impl InstructionCode<(&TypeIndex, &TableIndex)> for Call {
+    fn validate(
+        &self,
+        (&ty, &table): (&TypeIndex, &TableIndex),
+        comp: &mut ActiveCompilation,
+    ) -> bool {
+        Index::get_from_compiler(comp)
+            && comp
+                .get_table(table)
+                .is_some_and(|table| table.reftype == ReferenceType::Function)
+            && comp.simulate_call_indirect(ty)
     }
 
     fn call(
         &self,
-        (&table_idx, &expected_ty): (&TableIndex, &TypeIndex),
+        (&expected_ty, &table_idx): (&TypeIndex, &TableIndex),
         context: &mut WasmContext,
     ) -> ExecutionResult {
         let idx = Index::get(context.stack);
@@ -323,7 +335,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-for CastingMemoryAccess<T, E, A>
+    for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(&self, mem_arg: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
@@ -351,15 +363,20 @@ for CastingMemoryAccess<T, E, A>
 pub(super) struct MemoryInit;
 
 impl InstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
-    fn validate(&self, (&data, _): (&DataIndex, &TagByte<0x00>), _: &mut ActiveCompilation) -> bool {
+    fn validate(&self, (_, _): (&DataIndex, &TagByte<0x00>), _: &mut ActiveCompilation) -> bool {
         todo!()
     }
 
-    fn call(&self, (&data, _): (&DataIndex, &TagByte<0x00>), context: &mut WasmContext) -> ExecutionResult {
+    fn call(
+        &self,
+        (&data, _): (&DataIndex, &TagByte<0x00>),
+        context: &mut WasmContext,
+    ) -> ExecutionResult {
         let (mem_offset, data_offset, n) = <(Index, Index, Index)>::get(context.stack);
-        context.mem_init(MemoryIndex::ZERO, mem_offset, data, data_offset, n).map_err(Into::into)
+        context
+            .mem_init(MemoryIndex::ZERO, mem_offset, data, data_offset, n)
+            .map_err(Into::into)
     }
 }
 
-
-pub(super) use {access_type};
+pub(super) use access_type;

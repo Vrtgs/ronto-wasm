@@ -3,6 +3,7 @@ use crate::parser::Limit;
 use crate::vector::Index;
 use bytemuck::Pod;
 use std::cell::RefCell;
+use std::ffi::{CStr, CString};
 use std::fmt::Formatter;
 
 pub const PAGE_SIZE: u32 = 65536;
@@ -94,13 +95,20 @@ macro_rules! assign_or_fault {
 }
 
 macro_rules! access {
-    (&$(mut $(@$_mut:tt)?)? $buffer:expr, $memory_argument:expr, $addr:expr, $size:expr; $map: expr) => {{
+    (&$(mut $(@$_mut:tt)?)? $buffer:expr, $memory_argument:expr, $addr:expr $(, $size:expr)?; try { $map: expr }) => {{
         paste::paste! { let buffer = & $(mut $(@$_mut)?)? ** $buffer.[<borrow $(_mut $($_mut)?)?>](); }
 
         assign_or_fault!(addr = $memory_argument.offset().0.checked_add($addr.0).map(Index));
-        assign_or_fault!(end  = addr.as_usize().checked_add($size));
+        $(assign_or_fault!(end  = addr.as_usize().checked_add($size));)?
 
-        paste::paste! { assign_or_fault!(bytes = buffer.[<get $(_mut $($_mut)?)?>](addr.as_usize()..end));  }
+        let range = addr.as_usize()..$({
+            if false {
+                let _ = stringify!($size);
+            }
+            end
+        })?;
+
+        paste::paste! { assign_or_fault!(bytes = buffer.[<get $(_mut $($_mut)?)?>](range));  }
 
         if (bytes.as_ptr().addr() % $memory_argument.align()) != 0 {
             #[cold]
@@ -108,7 +116,11 @@ macro_rules! access {
             cold()
         }
 
-        Ok(($map)(bytes))
+        ($map)(bytes)
+    }};
+
+    (&$(mut $(@$_mut:tt)?)? $buffer:expr, $memory_argument:expr, $addr:expr $(, $size:expr)?; $map: expr) => {{
+        access!(&$(mut $(@$_mut)?)? $buffer, $memory_argument, $addr $(, $size)?; try { |buffer| Ok($map(buffer)) })
     }};
 }
 
@@ -181,6 +193,16 @@ impl MemoryBuffer {
         Ok(ptr)
     }
 
+    pub fn load_ctr(&self, addr: Index) -> Result<CString, MemoryFault> {
+        access!(&self.buffer, UnalignedAccess, addr; try {
+            |buffer: &[u8]| {
+                CStr::from_bytes_until_nul(buffer)
+                    .map_err(|_| MemoryFault::new())
+                    .map(CStr::to_owned)
+            }
+        })
+    }
+
     pub fn store_bytes(&self, addr: Index, value: &[u8]) -> Result<(), MemoryFault> {
         self.store_bytes_internal(UnalignedAccess, addr, value)
     }
@@ -201,15 +223,19 @@ impl MemoryBuffer {
         self.load_internal(UnalignedAccess, addr)
     }
 
-    pub(crate) fn store_bytes_internal(
+    #[inline]
+    fn store_bytes_internal(
         &self,
         memory_argument: impl MemoryArgument,
         addr: Index,
         value: &[u8],
     ) -> Result<(), MemoryFault> {
-        access!(&mut self.buffer, memory_argument, addr, value.len(); |bytes: &mut [u8]| {
-            bytes.copy_from_slice(value)
-        })
+        self.fill_with_inner(
+            memory_argument,
+            addr,
+            Index::from_usize(value.len()),
+            |bytes: &mut [u8]| bytes.copy_from_slice(value),
+        )
     }
 
     pub(crate) fn store_internal<T: Pod>(
@@ -225,13 +251,8 @@ impl MemoryBuffer {
         self.store_internal(UnalignedAccess, addr, value)
     }
 
-    pub(crate) fn fill(
-        &self,
-        addr: Index,
-        size: Index,
-        byte: u8,
-    ) -> Result<(), MemoryFault> {
-        access!(&mut self.buffer, UnalignedAccess, addr, size.as_usize(); |bytes: &mut [u8]| {
+    pub fn fill(&self, addr: Index, size: Index, byte: u8) -> Result<(), MemoryFault> {
+        self.fill_with(addr, size, |bytes| {
             // Safety:
             // slices are perfectly valid for reads and writes for |slice| and are always aligned
             // and u8 ... is a valid layout for u8
@@ -239,30 +260,40 @@ impl MemoryBuffer {
         })
     }
 
-    pub(crate) fn copy(
+    pub fn fill_with(
         &self,
-        src: Index,
-        dest: Index,
-        n: Index,
+        addr: Index,
+        size: Index,
+        func: impl FnOnce(&mut [u8]),
     ) -> Result<(), MemoryFault> {
+        self.fill_with_inner(UnalignedAccess, addr, size, func)
+    }
+
+    fn fill_with_inner(
+        &self,
+        memory_arg: impl MemoryArgument,
+        addr: Index,
+        size: Index,
+        func: impl FnOnce(&mut [u8]),
+    ) -> Result<(), MemoryFault> {
+        access!(&mut self.buffer, memory_arg, addr, size.as_usize(); |bytes: &mut [u8]| {
+            func(bytes)
+        })
+    }
+
+    pub fn copy(&self, src: Index, dest: Index, n: Index) -> Result<(), MemoryFault> {
         let buffer = &mut **self.buffer.borrow_mut();
 
         let src_start = src;
         assign_or_fault!(src_end = src.0.checked_add(n.0).map(Index));
 
-        if src_end.as_usize() > buffer.len() {
+        if src_end.as_usize() > buffer.len() || dest.as_usize() > buffer.len() - n.as_usize() {
             return Err(MemoryFault::new());
         }
 
-        let count = Index(src_end.0 - src_start.0);
-        if dest.as_usize() <= buffer.len() - count.as_usize() {
-            return Err(MemoryFault::new());
-        }
-
-        buffer.copy_within(src.as_usize()..src_end.as_usize(), dest.as_usize());
+        buffer.copy_within(src_start.as_usize()..src_end.as_usize(), dest.as_usize());
         Ok(())
     }
-
 
     pub fn init(&self, offset: Index, data: &[u8]) -> Result<(), MemoryFault> {
         access!(&mut self.buffer, UnalignedAccess, offset, data.len(); |bytes: &mut [u8]| {

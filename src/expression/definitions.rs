@@ -1,7 +1,13 @@
-use super::instruction_code::{access_type, AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit, Primitive, RefNull, VariableAccess};
+use super::instruction_code::{
+    AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit, Primitive,
+    RefNull, VariableAccess, access_type,
+};
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::invalid_data;
-use crate::parser::{DataIndex, Decode, ExternIndex, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType};
+use crate::parser::{
+    DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument,
+    MemoryIndex, NumericType, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
+};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryError;
 use crate::runtime::{Trap, WasmContext};
@@ -11,7 +17,6 @@ use std::io::Read;
 use std::marker::PhantomData;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
 
-type Extern = ExternIndex;
 type Function = FunctionIndex;
 type Label = LabelIndex;
 type Type = TypeIndex;
@@ -160,7 +165,7 @@ macro_rules! instruction {
         pub(super) enum ControlFlowInstruction {
             $($cf_ident $(($($cf_data),*))? ),+
         }
-        
+
         #[derive(Debug, PartialEq, Clone)]
         #[non_exhaustive]
         pub(super) enum SimpleInstruction {
@@ -250,7 +255,6 @@ macro_rules! instruction {
                 ret
             }
 
-            #[expect(dead_code)]
             pub(super) fn name(&self) -> &'static str {
                 // Warn on duplicate name
                 if false {
@@ -334,7 +338,6 @@ macro_rules! vector_lane {
         }
     };
 }
-
 
 vector_lane! {
     8 x 32 {
@@ -436,7 +439,7 @@ macro_rules! bin_op {
 }
 
 macro_rules! unop {
-    (<$ty:ty>::$name:ident) => { in_out!(a: $ty; <$ty>::$name(a)) };
+    (<$ty:ty>::$name:ident) => { in_out!(a: $ty; <$ty>::from(<$ty>::$name(a))) };
 }
 
 macro_rules! trap_if_zero {
@@ -460,37 +463,99 @@ macro_rules! modulo_n {
 }
 
 macro_rules! arithmetic {
-    ($ty:ty; clz) => { unop!(<$ty>::leading_zeros) };
-    ($ty:ty; ctz) => { unop!(<$ty>::trailing_zeros) };
-    ($ty:ty; popcount) => { unop!(<$ty>::count_ones) };
-    ($ty:ty; add) => { bin_op!(wrapping <$ty>::add) };
-    ($ty:ty; sub) => { bin_op!(wrapping <$ty>::sub) };
-    ($ty:ty; mul) => { bin_op!(wrapping <$ty>::mul) };
-    ($ty:ty; div) => { trap_if_zero!(<$ty>::wrapping_div) };
-    ($ty:ty; rem) => { trap_if_zero!(<$ty>::wrapping_rem) };
-    ($ty:ty; neg) => { unop!(<$ty>::wrapping_neg) };
-    ($ty:ty; not) => { unop!(<$ty>::not) };
-    ($ty:ty; and) => { bin_op!(<$ty>::bitand) };
-    ($ty:ty;  or) => { bin_op!(<$ty>::bitor ) };
-    ($ty:ty; xor) => { bin_op!(<$ty>::bitxor) };
-    ($ty:ty; shr) => { modulo_n!(<$ty>::wrapping_shr) };
-    ($ty:ty; shl) => { modulo_n!(<$ty>::wrapping_shl) };
-    ($ty:ty; rotr) => { bin_op!((a: $ty, b: u32); rotate_right) };
-    ($ty:ty; rotl) => { bin_op!((a: $ty, b: u32); rotate_left) };
-    (float $ty:ty; abs) => { unop!(<$ty>::abs) };
-    (float $ty:ty; neg) => { unop!(<$ty>::neg) };
-    (float $ty:ty; ceil) => { unop!(<$ty>::ceil) };
-    (float $ty:ty; floor) => { unop!(<$ty>::floor) };
-    (float $ty:ty; trunc) => { unop!(<$ty>::trunc) };
-    (float $ty:ty; nearest) => { unop!(<$ty>::round_ties_even) };
-    (float $ty:ty; sqrt) => { unop!(<$ty>::sqrt) };
-    (float $ty:ty; add) => { bin_op!(<$ty>::add) };
-    (float $ty:ty; sub) => { bin_op!(<$ty>::sub) };
-    (float $ty:ty; mul) => { bin_op!(<$ty>::mul) };
-    (float $ty:ty; div) => { bin_op!(<$ty>::div) };
-    (float $ty:ty; min) => { bin_op!(<$ty>::min) };
-    (float $ty:ty; max) => { bin_op!(<$ty>::max) };
-    (float $ty:ty; copysign) => { bin_op!(<$ty>::copysign) };
+    ($ty:ty; clz) => {
+        unop!(<$ty>::leading_zeros)
+    };
+    ($ty:ty; ctz) => {
+        unop!(<$ty>::trailing_zeros)
+    };
+    ($ty:ty; popcount) => {
+        unop!(<$ty>::count_ones)
+    };
+    ($ty:ty; add) => {
+        bin_op!(wrapping<$ty>::add)
+    };
+    ($ty:ty; sub) => {
+        bin_op!(wrapping<$ty>::sub)
+    };
+    ($ty:ty; mul) => {
+        bin_op!(wrapping<$ty>::mul)
+    };
+    ($ty:ty; div) => {
+        trap_if_zero!(<$ty>::wrapping_div)
+    };
+    ($ty:ty; rem) => {
+        trap_if_zero!(<$ty>::wrapping_rem)
+    };
+    ($ty:ty; neg) => {
+        unop!(<$ty>::wrapping_neg)
+    };
+    ($ty:ty; not) => {
+        unop!(<$ty>::not)
+    };
+    ($ty:ty; and) => {
+        bin_op!(<$ty>::bitand)
+    };
+    ($ty:ty;  or) => {
+        bin_op!(<$ty>::bitor)
+    };
+    ($ty:ty; xor) => {
+        bin_op!(<$ty>::bitxor)
+    };
+    ($ty:ty; shr) => {
+        modulo_n!(<$ty>::wrapping_shr)
+    };
+    ($ty:ty; shl) => {
+        modulo_n!(<$ty>::wrapping_shl)
+    };
+    ($ty:ty; rotr) => {
+        modulo_n!(<$ty>::rotate_right)
+    };
+    ($ty:ty; rotl) => {
+        modulo_n!(<$ty>::rotate_left)
+    };
+    (float $ty:ty; abs) => {
+        unop!(<$ty>::abs)
+    };
+    (float $ty:ty; neg) => {
+        unop!(<$ty>::neg)
+    };
+    (float $ty:ty; ceil) => {
+        unop!(<$ty>::ceil)
+    };
+    (float $ty:ty; floor) => {
+        unop!(<$ty>::floor)
+    };
+    (float $ty:ty; trunc) => {
+        unop!(<$ty>::trunc)
+    };
+    (float $ty:ty; nearest) => {
+        unop!(<$ty>::round_ties_even)
+    };
+    (float $ty:ty; sqrt) => {
+        unop!(<$ty>::sqrt)
+    };
+    (float $ty:ty; add) => {
+        bin_op!(<$ty>::add)
+    };
+    (float $ty:ty; sub) => {
+        bin_op!(<$ty>::sub)
+    };
+    (float $ty:ty; mul) => {
+        bin_op!(<$ty>::mul)
+    };
+    (float $ty:ty; div) => {
+        bin_op!(<$ty>::div)
+    };
+    (float $ty:ty; min) => {
+        bin_op!(<$ty>::min)
+    };
+    (float $ty:ty; max) => {
+        bin_op!(<$ty>::max)
+    };
+    (float $ty:ty; copysign) => {
+        bin_op!(<$ty>::copysign)
+    };
 }
 
 macro_rules! round_trip_cast {
@@ -514,7 +579,7 @@ impl<T: Decode> Decode for Optional<T> {
         match u32::decode(file)? {
             0 => Ok(Self(None)),
             1 => Ok(Self(Some(T::decode(file)?))),
-            _ => Err(invalid_data("too many items in vector"))
+            _ => Err(invalid_data("too many items in vector")),
         }
     }
 }
@@ -531,7 +596,10 @@ pub(super) enum BlockType {
 }
 
 impl BlockType {
-    pub(crate) fn resolve<'a>(&self, types: &'a WasmVec<TypeInfo>) -> anyhow::Result<(&'a [ValueType], &'a [ValueType])> {
+    pub(crate) fn resolve<'a>(
+        &self,
+        types: &'a WasmVec<TypeInfo>,
+    ) -> anyhow::Result<(&'a [ValueType], &'a [ValueType])> {
         macro_rules! const_ref {
             ($ty:expr$(, ($($pat:tt)*))+ $(,)?) => {
                 match $ty {
@@ -543,7 +611,8 @@ impl BlockType {
         match *self {
             BlockType::Empty => Ok((&[], &[])),
             BlockType::Type(ty) => Ok((&[], {
-                const_ref!(ty,
+                const_ref!(
+                    ty,
                     (ValueType::NumericType(NumericType::I32)),
                     (ValueType::NumericType(NumericType::I64)),
                     (ValueType::NumericType(NumericType::F32)),
@@ -555,7 +624,8 @@ impl BlockType {
             })),
             BlockType::TypeIndex(ty) => {
                 let idx = Index(ty as u32);
-                types.get(idx)
+                types
+                    .get(idx)
                     .map(|info| (&*info.parameters, &*info.result))
                     .ok_or_else(|| invalid_data(format!("unresolved type {}", idx.0)))
             }
@@ -576,7 +646,6 @@ impl Decode for BlockType {
         }
     }
 }
-
 
 #[inline(always)]
 fn splat32(v: u32) -> u128 {
@@ -614,14 +683,14 @@ instruction! {
 
 
         ("call",                  Call) => 0x10 (Function) code: Call,
-        ("call_indirect", CallIndirect) => 0x11 (Table, Type) code: Call,
+        ("call_indirect", CallIndirect) => 0x11 (Type, Table) code: Call,
 
         // Reference Instructions
         const ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull, // FIXME heaptype
         const ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::NULL),
         const ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
 
-        
+
         // Variable Instructions
         ("local.get",   LocalGet) => 0x20 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Get) }>(PhantomData),
         ("local.set",   LocalSet) => 0x21 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Set) }>(PhantomData),

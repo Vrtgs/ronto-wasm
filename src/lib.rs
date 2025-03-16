@@ -12,6 +12,7 @@ mod vector;
 
 pub use parser::parse_file;
 pub use runtime::WasmVirtualMachine;
+pub use vector::Index;
 
 pub(crate) trait Stack<T> {
     fn pop_n<const N: usize>(&mut self) -> Option<[T; N]>;
@@ -46,14 +47,13 @@ pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyh
 #[cfg(test)]
 mod tests {
     use crate::parse_file;
-    use crate::runtime::memory_buffer::MemoryBuffer;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
     use crate::runtime::{CallError, GetFunctionError, WasmVirtualMachine};
     use crate::vector::Index;
-    use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use bytemuck::{Pod, Zeroable};
-    use std::ffi::CString;
+    use image::GenericImageView;
     use std::fmt::Debug;
     use std::fs::File;
     use std::io;
@@ -68,18 +68,6 @@ mod tests {
         )?)?)
     }
 
-    fn read_cstr(ptr: Index, mem: &MemoryBuffer) -> CString {
-        let mut str = Vec::new();
-        for i in (0..).map(|i| Index(ptr.0 + i)) {
-            let byte = mem.load::<u8>(i).unwrap();
-            if byte == 0 {
-                break;
-            }
-            str.push(byte)
-        }
-        CString::new(str).unwrap()
-    }
-
     fn test<In: FunctionInput, Out: FunctionOutput + PartialEq + Debug>(
         path: impl AsRef<Path>,
         function: &str,
@@ -87,9 +75,8 @@ mod tests {
         expected_output: Out,
     ) -> Result<(), CallError> {
         let vm = get_vm(path).unwrap();
-        vm.call_by_name::<In, Out>(function, input).map(|output| {
-            assert_eq!(output, expected_output)
-        })
+        vm.call_by_name::<In, Out>(function, input)
+            .map(|output| assert_eq!(output, expected_output))
     }
 
     #[test]
@@ -103,7 +90,6 @@ mod tests {
     fn fib_rust() {
         test("fib-rust", "fib", 24_i32, 75025_i64).unwrap();
     }
-
 
     #[test]
     fn factorial() {
@@ -122,7 +108,8 @@ mod tests {
             "to_double_digit",
             ('7' as u32, '8' as u32),
             78_u32,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -132,27 +119,66 @@ mod tests {
     }
 
     #[test]
+    fn rotate_tests() {
+        test("rot", "rotl", (0x12345678_u32, 8_u32), 0x34567812_u32).unwrap();
+        test("rot", "rotr", (0x12345678_u32, 8_u32), 0x78123456_u32).unwrap();
+        test(
+            "rot",
+            "rotl64",
+            (0x123456789ABCDEF0_u64, 16_u64),
+            0x56789ABCDEF01234_u64,
+        )
+        .unwrap();
+        test(
+            "rot",
+            "rotr64",
+            (0x123456789ABCDEF0_u64, 16_u64),
+            0xDEF0123456789ABC_u64,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn select_t() {
         test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64).unwrap();
         test("select_t", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64).unwrap();
-        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 1_i32), 9.11_f64).unwrap();
-        test("select_t", "explicit_select", (9.11_f64, 69.0_f64, 0_i32), 69.0_f64).unwrap()
+        test(
+            "select_t",
+            "explicit_select",
+            (9.11_f64, 69.0_f64, 1_i32),
+            9.11_f64,
+        )
+        .unwrap();
+        test(
+            "select_t",
+            "explicit_select",
+            (9.11_f64, 69.0_f64, 0_i32),
+            69.0_f64,
+        )
+        .unwrap()
     }
 
     #[test]
     fn mismatched_type() {
         assert!(matches!(
-            test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7.0_f64),
-            Err(CallError::GetFunctionError(GetFunctionError::MismatchedType(_),))
+            test(
+                "select_t",
+                "implicit_select",
+                (7_i64, 8_i64, 1_i32),
+                7.0_f64
+            ),
+            Err(CallError::GetFunctionError(
+                GetFunctionError::MismatchedType(_),
+            ))
         ))
     }
 
     #[test]
     fn cstr() -> anyhow::Result<()> {
         let vm = get_vm("test_cstr")?;
-        let ptr = vm.call_by_name::<(), Index>("get_cstr", ()).unwrap();
+        let ptr = vm.call_by_name::<(), Index>("get_cstr", ())?;
         let mem = vm.get_memory_by_name("memory").unwrap();
-        let cstr = read_cstr(ptr, mem);
+        let cstr = mem.load_ctr(ptr)?;
         assert_eq!(*c"Hello World", *cstr);
         Ok(())
     }
@@ -164,13 +190,11 @@ mod tests {
 
         for original in [c"FOO", c"BAR", cr###"{ "yay_son": "json" }"###] {
             let bytes = original.to_bytes();
-            let ptr = mem.place_bytes(bytes).unwrap();
+            let ptr = mem.place_bytes(bytes)?;
             let len = Index::from_usize(bytes.len());
 
-            let ptr = vm
-                .call_by_name::<(Index, Index), Index>("make_cstr", (ptr, len))
-                .unwrap();
-            let cstr = read_cstr(ptr, mem);
+            let ptr = vm.call_by_name::<(Index, Index), Index>("make_cstr", (ptr, len))?;
+            let cstr = mem.load_ctr(ptr)?;
             assert_eq!(*original, *cstr);
         }
 
@@ -200,75 +224,65 @@ mod tests {
         });
 
         for original in data {
-            let ptr = mem.place_bytes(&original).unwrap();
+            let ptr = mem.place_bytes(&original)?;
             let len = Index::from_usize(original.len());
 
-            let result_location = mem.place(&Bytes::zeroed()).unwrap();
+            let result_location = mem.place(&Bytes::zeroed())?;
 
             vm.call_by_name::<(Index, Index, Index), ()>(
                 "encode_base64",
                 (result_location, ptr, len),
-            )
-                .unwrap();
-            let Bytes { ptr, len } = mem.load(result_location).unwrap();
-            let bytes = BASE64_STANDARD
-                .decode(mem.load_bytes(ptr, len).unwrap())
-                .unwrap();
+            )?;
+            let Bytes { ptr, len } = mem.load(result_location)?;
+            let bytes = BASE64_STANDARD.decode(mem.load_bytes(ptr, len).unwrap())?;
             assert_eq!(*original, *bytes);
         }
 
         Ok(())
     }
 
-    // fn png_decode_inner() -> anyhow::Result<()> {
-    //     let vm = get_vm("decode_image")?;
-    //     let mem = vm.get_memory_by_name("memory").unwrap();
-    //
-    //     for image in std::fs::read_dir("./test-files/assets/images")? {
-    //         let image = image?.path();
-    //         let image_bytes = std::fs::read(image)?;
-    //         let image = image::load_from_memory(&image_bytes).unwrap();
-    //
-    //         let ptr = mem.place_bytes(&image_bytes).unwrap();
-    //         let len = Index::from_usize(image_bytes.len());
-    //         drop(image_bytes);
-    //
-    //         #[derive(Debug, Copy, Clone, Pod, Zeroable)]
-    //         #[repr(C)]
-    //         struct Image {
-    //             width: u32,
-    //             height: u32,
-    //             bytes: Bytes,
-    //         }
-    //
-    //         let result_location = mem.place(&Image::zeroed()).unwrap();
-    //
-    //         vm.call_by_name::<(Index, Index, Index), ()>(
-    //             "decode_image",
-    //             (result_location, ptr, len),
-    //         )
-    //             .unwrap();
-    //
-    //         let result_image = mem.load::<Image>(result_location).unwrap();
-    //         assert_eq!((result_image.width, result_image.height), image.dimensions());
-    //
-    //         let bytes = mem.load_bytes(result_image.bytes.ptr, result_image.bytes.len).unwrap();
-    //         assert_eq!(&*bytes, image.as_bytes())
-    //     }
-    //
-    //     Ok(())
-    // }
-    //
-    // #[test]
-    // #[cfg_attr(miri, ignore)]
-    // fn png_decode() -> io::Result<()> {
-    //     std::thread::Builder::new()
-    //         .stack_size(10 * 1024 * 1024)
-    //         .spawn(png_decode_inner)?
-    //         .join()
-    //         .unwrap()
-    // }
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn png_decode() -> anyhow::Result<()> {
+        let vm = get_vm("decode_image")?;
+        let mem = vm.get_memory_by_name("memory").unwrap();
 
+        for image in std::fs::read_dir("./test-files/assets/images")? {
+            let image = image?.path();
+            let image_bytes = std::fs::read(image)?;
+            let image = image::load_from_memory(&image_bytes)?;
+
+            let ptr = mem.place_bytes(&image_bytes)?;
+            let len = Index::from_usize(image_bytes.len());
+            drop(image_bytes);
+
+            #[derive(Debug, Copy, Clone, Pod, Zeroable)]
+            #[repr(C)]
+            struct Image {
+                width: u32,
+                height: u32,
+                bytes: Bytes,
+            }
+
+            let result_location = mem.place(&Image::zeroed())?;
+
+            vm.call_by_name::<(Index, Index, Index), ()>(
+                "decode_image",
+                (result_location, ptr, len),
+            )?;
+
+            let result_image = mem.load::<Image>(result_location)?;
+            assert_eq!(
+                (result_image.width, result_image.height),
+                image.dimensions()
+            );
+
+            let bytes = mem.load_bytes(result_image.bytes.ptr, result_image.bytes.len)?;
+            assert_eq!(&*bytes, image.as_bytes())
+        }
+
+        Ok(())
+    }
 
     // TODO: actually run the tests
     #[test]

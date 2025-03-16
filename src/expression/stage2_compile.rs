@@ -1,6 +1,8 @@
-use crate::expression::definitions::SimpleInstruction;
-use crate::expression::stage1_compile::{LiteralInstruction, ResolvedInstruction, StructuredControlFlow, UnresolvedJump};
 use crate::expression::ActiveCompilation;
+use crate::expression::definitions::SimpleInstruction;
+use crate::expression::stage1_compile::{
+    LiteralInstruction, ResolvedInstruction, StructuredControlFlow, UnresolvedJump,
+};
 use crate::parser::{LabelIndex, NumericType, ValueType};
 use crate::vector::{Index, WasmVec};
 
@@ -24,13 +26,16 @@ pub(super) enum LabeledInstruction {
     Literal(LiteralInstruction),
 }
 
-pub(super) fn compile(expression: WasmVec<ResolvedInstruction>, compiler: &mut ActiveCompilation) -> anyhow::Result<WasmVec<LabeledInstruction>> {
+pub(super) fn compile(
+    expression: WasmVec<ResolvedInstruction>,
+    _compiler: &mut ActiveCompilation,
+) -> anyhow::Result<WasmVec<LabeledInstruction>> {
     let mut instructions = vec![];
     let mut extra_offset = 0;
     for instruction in expression {
         macro_rules! make_label {
             ($ty:ident; $start:expr, $end:expr, $block_type:expr) => {{
-                let (input, output) = $block_type.resolve(compiler.context.types)?;
+                let (input, output) = $block_type.resolve(_compiler.context.types)?;
                 let to_owned = |tys: &[ValueType]| WasmVec::from_trusted_box(tys.into());
                 make_label!($ty; $start, $end; (to_owned(input)) -> to_owned(output))
             }};
@@ -45,32 +50,35 @@ pub(super) fn compile(expression: WasmVec<ResolvedInstruction>, compiler: &mut A
             }};
         }
         match instruction {
-            ResolvedInstruction::StructureCf(cf) => {
-                match cf {
-                    StructuredControlFlow::IfElse { .. } => todo!(),
-                    StructuredControlFlow::If { start, end } => {
-                        let i32_input = WasmVec::from_trusted_box(Box::new([
-                            ValueType::NumericType(NumericType::I32)
-                        ]));
+            ResolvedInstruction::StructureCf(cf) => match cf {
+                StructuredControlFlow::IfElse { .. } => todo!(),
+                StructuredControlFlow::If { start, end } => {
+                    let i32_input = WasmVec::from_trusted_box(Box::new([ValueType::NumericType(
+                        NumericType::I32,
+                    )]));
 
-                        extra_offset += 2;
-                        
-                        instructions.push(make_label!(Block; start, end; (i32_input) -> (WasmVec::new())));
-                        instructions.push(LabeledInstruction::Literal(
-                            LiteralInstruction::Simple(SimpleInstruction::I32EqZ)
-                        ));
-                        instructions.push(LabeledInstruction::JumpCf(
-                            UnresolvedJump::BranchIf(LabelIndex(Index(0)))
-                        ));
-                    }
-                    StructuredControlFlow::Loop { start, end, block_type } => {
-                        instructions.push(make_label!(Loop; start, end, block_type))
-                    }
-                    StructuredControlFlow::Block { start, end, block_type } => {
-                        instructions.push(make_label!(Block; start, end, block_type))
-                    }
+                    instructions.push(make_label!(Block; start, Index(end.0 + 2); (i32_input) -> (WasmVec::new())));
+
+                    extra_offset += 2;
+
+                    instructions.push(LabeledInstruction::Literal(LiteralInstruction::Simple(
+                        SimpleInstruction::I32EqZ,
+                    )));
+                    instructions.push(LabeledInstruction::JumpCf(UnresolvedJump::BranchIf(
+                        LabelIndex(Index(0)),
+                    )));
                 }
-            }
+                StructuredControlFlow::Loop {
+                    start,
+                    end,
+                    block_type,
+                } => instructions.push(make_label!(Loop; start, end, block_type)),
+                StructuredControlFlow::Block {
+                    start,
+                    end,
+                    block_type,
+                } => instructions.push(make_label!(Block; start, end, block_type)),
+            },
             ResolvedInstruction::EndCf => instructions.push(LabeledInstruction::End),
             ResolvedInstruction::JumpCf(jump) => {
                 instructions.push(LabeledInstruction::JumpCf(jump))

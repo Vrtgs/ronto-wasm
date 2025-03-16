@@ -541,9 +541,7 @@ impl Decode for Element {
             _ => ElementKind::decode(file)?,
         };
         let init = match flags {
-            0x00..=0x03 => {
-                WasmVec::<FunctionIndex>::decode(file)?.map(Expression::function_call)
-            }
+            0x00..=0x03 => WasmVec::<FunctionIndex>::decode(file)?.map(Expression::function_call),
             _ => WasmVec::<Expression>::decode(file)?,
         };
         let result = Element { kind, init, mode };
@@ -744,8 +742,7 @@ decodable! {
 
 use crate::invalid_data;
 use crate::runtime::parameter::fmt_ty_vec;
-use crate::vector::{vector_from_vec, Index, WasmVec};
-
+use crate::vector::{Index, WasmVec, vector_from_vec};
 
 #[derive(Debug)]
 #[non_exhaustive]

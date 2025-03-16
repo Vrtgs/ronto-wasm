@@ -1,15 +1,20 @@
 mod definitions;
 mod instruction_code;
 
-use crate::expression::definitions::{ControlFlowInstruction, Instruction, Optional, ParametricInstruction, SimpleInstruction};
+use crate::expression::definitions::{
+    ControlFlowInstruction, Instruction, Optional, ParametricInstruction, SimpleInstruction,
+};
 use crate::expression::stage2_compile::LabelType;
-use crate::parser::{Decode, ExternIndex, FunctionDefinition, FunctionIndex, GlobalIndex, GlobalType, LabelIndex, LocalIndex, NumericType, ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType};
+use crate::parser::{
+    Decode, ExternIndex, FunctionDefinition, FunctionIndex, GlobalIndex, GlobalType, LabelIndex,
+    LocalIndex, NumericType, ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType,
+};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryFault;
 use crate::runtime::parameter::sealed::SealedInput;
 use crate::runtime::{ReferenceValue, Trap, Value, WasmContext};
-use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::{invalid_data, Stack, WasmVirtualMachine};
+use crate::vector::{Index, WasmVec, vector_from_vec};
+use crate::{Stack, WasmVirtualMachine, invalid_data};
 use anyhow::ensure;
 use std::io::Read;
 
@@ -30,9 +35,9 @@ pub struct Expression {
 impl Expression {
     pub fn function_call(idx: FunctionIndex) -> Self {
         Self {
-            instructions: WasmVec::from_trusted_box(Box::new([
-                Instruction::Simple(SimpleInstruction::RefFunc(idx))
-            ])),
+            instructions: WasmVec::from_trusted_box(Box::new([Instruction::Simple(
+                SimpleInstruction::RefFunc(idx),
+            )])),
         }
     }
 
@@ -80,7 +85,7 @@ impl CompiledParametricInstruction {
                 let value = match cond {
                     Value::I32(0) => val2,
                     Value::I32(_) => val1,
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 };
                 context.push(value);
             }
@@ -103,11 +108,11 @@ pub struct Jump {
 }
 
 impl Jump {
-    #[cold]
     #[inline(always)]
     fn jump(self, bp: Index, ip: &mut Index, context: &mut WasmContext) {
         let stack_start = Index(bp.0 + self.return_address.0).as_usize();
-        let stack_end = Index(Index::from_usize(context.stack.len()).0 - self.return_amount.0).as_usize();
+        let stack_end =
+            Index(Index::from_usize(context.stack.len()).0 - self.return_amount.0).as_usize();
         context.stack.drain(stack_start..stack_end);
         *ip = self.goto
     }
@@ -147,7 +152,6 @@ enum CompiledInstruction {
 pub struct FunctionBody {
     instructions: WasmVec<CompiledInstruction>,
 }
-
 
 pub(crate) struct WasmCompilationContext<'a> {
     globals: &'a WasmVec<GlobalType>,
@@ -202,7 +206,7 @@ impl Compile for IncompleteJump {
         let jump = match self {
             IncompleteJump::Jump(label) => {
                 let takes = label.takes();
-                compiler.pop_slice(takes)?;
+                compiler.ensure_slice_top(takes)?;
                 compiler.set_unreachable();
                 JumpType::Jump(Jump {
                     goto: label.goto,
@@ -212,11 +216,13 @@ impl Compile for IncompleteJump {
             }
             IncompleteJump::JumpIf(label) => {
                 let Some(ValueType::NumericType(NumericType::I32)) = compiler.pop() else {
-                    return Err(invalid_data("br_if failed to compile; no condition on top of the stack"))
+                    return Err(invalid_data(
+                        "br_if failed to compile; no condition on top of the stack",
+                    ));
                 };
                 let takes = label.takes();
 
-                compiler.pop_slice(takes)?;
+                compiler.ensure_slice_top(takes)?;
                 JumpType::JumpIf(Jump {
                     goto: label.goto,
                     return_address: label.return_address,
@@ -235,7 +241,7 @@ impl Compile for IncompleteJump {
                     })
                 })?;
 
-                compiler.pop_slice(takes)?;
+                compiler.ensure_slice_top(takes)?;
                 compiler.set_unreachable();
                 JumpType::JumpTable {
                     table,
@@ -257,14 +263,22 @@ impl Compile for ParametricInstruction {
         let instr = match self {
             ParametricInstruction::Drop => {
                 let Some(val) = compiler.pop() else {
-                    return Err(invalid_data("drop invoked, when nothing was on the top of the stack"))
+                    return Err(invalid_data(
+                        "drop invoked, when nothing was on the top of the stack",
+                    ));
                 };
                 CompiledParametricInstruction::Drop(val)
             }
-            ParametricInstruction::SelectT(Optional(None))
-            | ParametricInstruction::Select => {
-                let Some([ValueType::NumericType(ty1), ValueType::NumericType(ty2), ValueType::NumericType(NumericType::I32)]) = compiler.pop_n() else {
-                    return Err(invalid_data("invalid invocation of select"))
+            ParametricInstruction::SelectT(Optional(None)) | ParametricInstruction::Select => {
+                let Some(
+                    [
+                        ValueType::NumericType(ty1),
+                        ValueType::NumericType(ty2),
+                        ValueType::NumericType(NumericType::I32),
+                    ],
+                ) = compiler.pop_n()
+                else {
+                    return Err(invalid_data("invalid invocation of select"));
                 };
                 if ty1 != ty2 {
                     return Err(invalid_data("mismatched types passed to select"));
@@ -273,8 +287,11 @@ impl Compile for ParametricInstruction {
                 CompiledParametricInstruction::Select(ValueType::NumericType(ty1))
             }
             ParametricInstruction::SelectT(Optional(Some(ty))) => {
-                let Some([ty1, ty2, ValueType::NumericType(NumericType::I32)]) = compiler.pop_n() else {
-                    return Err(invalid_data("select requires a condition on the top of the stack"))
+                let Some([ty1, ty2, ValueType::NumericType(NumericType::I32)]) = compiler.pop_n()
+                else {
+                    return Err(invalid_data(
+                        "select requires a condition on the top of the stack",
+                    ));
                 };
                 if ty1 != ty || ty2 != ty {
                     return Err(invalid_data("select explicit type not satisfied"));
@@ -290,13 +307,15 @@ impl Compile for ParametricInstruction {
 
 impl ActiveCompilation<'_, '_> {
     pub(crate) fn pop_type_input(&mut self, r#type: TypeIndex) -> bool {
-        self.context.types
+        self.context
+            .types
             .get(r#type.0)
             .is_some_and(|ty| self.pop_slice(&ty.parameters).is_ok())
     }
 
     pub(crate) fn push_type_output(&mut self, r#type: TypeIndex) -> bool {
-        self.context.types
+        self.context
+            .types
             .get(r#type.0)
             .map(|ty| self.push_slice(&ty.result))
             .is_some()
@@ -341,10 +360,6 @@ impl ActiveCompilation<'_, '_> {
         self.values.push(value)
     }
 
-    pub(crate) fn push_n<const N: usize>(&mut self, data: [ValueType; N]) {
-        self.values.extend(data)
-    }
-
     pub(crate) fn push_slice(&mut self, data: &[ValueType]) {
         self.values.extend_from_slice(data)
     }
@@ -352,6 +367,11 @@ impl ActiveCompilation<'_, '_> {
     pub(crate) fn is_slice_top(&self, data: &[ValueType]) -> bool {
         let stack = &self.values;
         data.len() <= stack.len() && stack[stack.len() - data.len()..] == *data
+    }
+
+    pub(crate) fn ensure_slice_top(&self, data: &[ValueType]) -> anyhow::Result<()> {
+        ensure!(self.is_slice_top(data), "invalid slice top");
+        Ok(())
     }
 
     pub(crate) fn pop_slice(&mut self, data: &[ValueType]) -> anyhow::Result<()> {
@@ -381,21 +401,18 @@ impl ActiveCompilation<'_, '_> {
     }
 }
 
-impl<'env> ActiveCompilation<'_, 'env> {
-    fn stack_top(&self) -> anyhow::Result<Index> {
-        Index::try_from_usize(self.values.len()).ok_or_else(|| invalid_data("too many values on the operand stack"))
-    }
-
-    fn instructions_top(&self) -> anyhow::Result<Index> {
-        Index::try_from_usize(self.instructions.len()).ok_or_else(|| invalid_data("too many instructions in function body"))
-    }
-
+impl ActiveCompilation<'_, '_> {
     fn resolve_return(&self) -> Label {
-        self.labels.first().cloned().expect("there should always be at least one label for function return")
+        self.labels
+            .first()
+            .cloned()
+            .expect("there should always be at least one label for function return")
     }
 
     fn resolve_label(&self, idx: LabelIndex) -> anyhow::Result<Label> {
-        self.labels.iter().nth_back(idx.0.as_usize())
+        self.labels
+            .iter()
+            .nth_back(idx.0.as_usize())
             .cloned()
             .ok_or_else(|| invalid_data(format!("couldn't resolve label {}", idx.0.0)))
     }
@@ -406,19 +423,23 @@ impl<'env> ActiveCompilation<'_, 'env> {
         Ok(())
     }
 
-    fn pop_label(&mut self) -> anyhow::Result<()> {
+    fn pop_label(&mut self) -> anyhow::Result<Label> {
         if self.labels.len() <= 1 {
             assert_ne!(self.labels.len(), 0);
             return Err(invalid_data("can't pop the function label"));
         }
 
         let label = self.labels.pop().unwrap();
-        let valid_label_return =
-            Some(self.values.len()) == label.return_address.as_usize().checked_add(label.output.len())
-                && self.is_slice_top(&label.output);
+        let valid_label_return = self.hit_unreachable()
+            || (Some(self.values.len())
+                == label
+                    .return_address
+                    .as_usize()
+                    .checked_add(label.output.len())
+                && self.is_slice_top(&label.output));
 
         ensure!(valid_label_return, "invalid label output");
-        Ok(())
+        Ok(label)
     }
 
     fn add_instruction(&mut self, instr: impl Compile) -> anyhow::Result<()> {
@@ -434,7 +455,9 @@ impl<'env> ActiveCompilation<'_, 'env> {
         if !self.hit_unreachable() {
             self.pop_slice(self.expected_output)?;
             if !self.values.is_empty() {
-                return Err(invalid_data("too many values on the stack before function return"));
+                return Err(invalid_data(
+                    "too many values on the stack before function return",
+                ));
             }
         }
 
@@ -443,7 +466,12 @@ impl<'env> ActiveCompilation<'_, 'env> {
 }
 
 impl<'a> WasmCompilationContext<'a> {
-    pub(crate) fn new(globals: &'a WasmVec<GlobalType>, function_signatures: &'a WasmVec<TypeIndex>, types: &'a WasmVec<TypeInfo>, tables: &'a WasmVec<TableType>) -> Self {
+    pub(crate) fn new(
+        globals: &'a WasmVec<GlobalType>,
+        function_signatures: &'a WasmVec<TypeIndex>,
+        types: &'a WasmVec<TypeInfo>,
+        tables: &'a WasmVec<TableType>,
+    ) -> Self {
         Self {
             globals,
             function_signatures,
@@ -452,28 +480,44 @@ impl<'a> WasmCompilationContext<'a> {
         }
     }
 
-    fn start_compilation(&self, function: FunctionDefinition, ty: TypeIndex) -> anyhow::Result<(Expression, ActiveCompilation<'_, 'a>)> {
-        let function_signature = self.types.get(ty.0)
+    fn start_compilation(
+        &self,
+        function: FunctionDefinition,
+        ty: TypeIndex,
+    ) -> anyhow::Result<(Expression, ActiveCompilation<'_, 'a>)> {
+        let function_signature = self
+            .types
+            .get(ty.0)
             .ok_or_else(|| invalid_data("invalid type index"))?;
 
-        let locals = WasmVec::try_from(function_signature.parameters.iter().copied().chain(function.locals).collect::<Box<[_]>>())
-            .map_err(|_| invalid_data("too many parameters and locals in function"))?;
+        let locals = WasmVec::try_from(
+            function_signature
+                .parameters
+                .iter()
+                .copied()
+                .chain(function.locals)
+                .collect::<Box<[_]>>(),
+        )
+        .map_err(|_| invalid_data("too many parameters and locals in function"))?;
 
-        Ok((function.body, ActiveCompilation {
-            context: self,
-            expected_output: &function_signature.result,
-            instructions: vec![],
-            locals,
-            values: vec![],
-            labels: vec![Label {
-                goto: Index(u32::MAX),
-                return_address: Index(0),
-                label_type: LabelType::Block,
-                input: function_signature.parameters.clone(),
-                output: function_signature.result.clone(),
-            }],
-            hit_unreachable: false,
-        }))
+        Ok((
+            function.body,
+            ActiveCompilation {
+                context: self,
+                expected_output: &function_signature.result,
+                instructions: vec![],
+                locals,
+                values: vec![],
+                labels: vec![Label {
+                    goto: Index(u32::MAX),
+                    return_address: Index(0),
+                    label_type: LabelType::Block,
+                    input: function_signature.parameters.clone(),
+                    output: function_signature.result.clone(),
+                }],
+                hit_unreachable: false,
+            },
+        ))
     }
 }
 
@@ -482,7 +526,11 @@ mod stage2_compile;
 mod stage3_compile;
 
 impl FunctionBody {
-    pub fn new(definition: FunctionDefinition, ty: TypeIndex, compiler: &mut WasmCompilationContext) -> anyhow::Result<Self> {
+    pub fn new(
+        definition: FunctionDefinition,
+        ty: TypeIndex,
+        compiler: &mut WasmCompilationContext,
+    ) -> anyhow::Result<Self> {
         let (expr, mut active_compilation) = compiler.start_compilation(definition, ty)?;
 
         let stage1 = stage1_compile::compile(expr, &mut active_compilation)?;
@@ -499,37 +547,47 @@ impl FunctionBody {
         macro_rules! jump {
             ($jmp: expr) => {{
                 $jmp.jump(bp, &mut ip, context);
-                continue
+                continue;
             }};
         }
 
         while let Some(instruction) = self.instructions.get(ip) {
+            // eprintln!("instruction pointer: {ip:?}");
+            // eprintln!("stack: {:?}", context.stack);
+            // eprintln!("locals: {:?}", context.locals);
+            // eprintln!();
+            //
+            // eprintln!("next instruction: {:?}", instruction);
+            // std::io::stdin().lines().next().transpose().unwrap();
+
             match instruction {
-                CompiledInstruction::Jump(jump) => {
-                    match jump {
-                        JumpType::Jump(jmp) => jump!(jmp),
-                        JumpType::JumpIf(jmp) => {
-                            let cond = u32::get(context.stack);
-                            if cond != 0 {
-                                jump!(jmp)
-                            }
-                        }
-                        &JumpType::JumpTable { ref table, ref fallback, return_amount } => {
-                            let idx = Index::get(context.stack);
-                            let jmp = table.get(idx).unwrap_or(fallback);
-                            jump!(Jump {
-                                goto: jmp.goto,
-                                return_address: jmp.goto,
-                                return_amount
-                            })
+                CompiledInstruction::Jump(jump) => match jump {
+                    JumpType::Jump(jmp) => jump!(jmp),
+                    JumpType::JumpIf(jmp) => {
+                        let cond = u32::get(context.stack);
+                        if cond != 0 {
+                            jump!(jmp)
                         }
                     }
-                }
+                    &JumpType::JumpTable {
+                        ref table,
+                        ref fallback,
+                        return_amount,
+                    } => {
+                        let idx = Index::get(context.stack);
+                        let jmp = table.get(idx).unwrap_or(fallback);
+                        jump!(Jump {
+                            goto: jmp.goto,
+                            return_address: jmp.return_address,
+                            return_amount
+                        })
+                    }
+                },
                 CompiledInstruction::Parametric(instr) => instr.execute(context),
-                CompiledInstruction::Simple(instr) => instr.execute(context)?
+                CompiledInstruction::Simple(instr) => instr.execute(context)?,
             }
             let Some(next) = ip.0.checked_add(1) else {
-                break
+                break;
             };
             ip.0 = next
         }
@@ -562,9 +620,15 @@ impl Decode for Expression {
                         break;
                     }
                 }
-                Instruction::ControlFlow(ControlFlowInstruction::Block(_)) => control_flow.push(IncompleteControlFlow::Block),
-                Instruction::ControlFlow(ControlFlowInstruction::Loop(_)) => control_flow.push(IncompleteControlFlow::Loop),
-                Instruction::ControlFlow(ControlFlowInstruction::If(_)) => control_flow.push(IncompleteControlFlow::If),
+                Instruction::ControlFlow(ControlFlowInstruction::Block(_)) => {
+                    control_flow.push(IncompleteControlFlow::Block)
+                }
+                Instruction::ControlFlow(ControlFlowInstruction::Loop(_)) => {
+                    control_flow.push(IncompleteControlFlow::Loop)
+                }
+                Instruction::ControlFlow(ControlFlowInstruction::If(_)) => {
+                    control_flow.push(IncompleteControlFlow::If)
+                }
                 Instruction::ControlFlow(ControlFlowInstruction::Else) => {
                     let Some(r#if @ IncompleteControlFlow::If) = control_flow.last_mut() else {
                         return Err(invalid_data("unexpected else clause"));
@@ -578,7 +642,10 @@ impl Decode for Expression {
         }
 
         if !control_flow.is_empty() {
-            return Err(invalid_data(format!("unescaped control flow: {:?}", control_flow)));
+            return Err(invalid_data(format!(
+                "unescaped control flow: {:?}",
+                control_flow
+            )));
         }
 
         Ok(Self {

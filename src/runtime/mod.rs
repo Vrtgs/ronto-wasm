@@ -1,23 +1,28 @@
 use crate::expression::{Expression, FunctionBody, WasmCompilationContext};
-use crate::parser::{Data, DataIndex, Element, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, ImportDescription, InitMode, LocalIndex, MemoryArgument, MemoryIndex, NumericType, ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections, WasmVersion};
+use crate::parser::{
+    Data, DataIndex, Element, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex,
+    GlobalType, ImportDescription, InitMode, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
+    ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections,
+    WasmVersion,
+};
 use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::{invalid_data, Stack as _};
+use crate::vector::{Index, WasmVec, vector_from_vec};
+use crate::{Stack as _, invalid_data};
 use bytemuck::Pod;
 use crossbeam::atomic::AtomicCell;
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::collections::hash_map::Entry;
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::iter;
 use thiserror::Error;
 
 pub mod memory_buffer;
 pub mod parameter;
+mod wasi_snapshot_preview1;
 
 #[derive(Debug, Copy, Clone)]
 pub enum ReferenceValue {
@@ -209,13 +214,13 @@ enum Mut64Type {
     F64,
 }
 
-enum GlobalValue {
+enum GlobalValueInner {
     Immutable(Value),
     Mutable64(AtomicU64, Mut64Type),
     Mutable128(AtomicCell<u128>),
 }
 
-impl GlobalValue {
+impl GlobalValueInner {
     pub fn new(value: GlobalType) -> Self {
         match (value.mutable, value.value_type) {
             (false, ty) => Self::Immutable(Value::new(ty)),
@@ -260,16 +265,16 @@ impl GlobalValue {
 
     fn store_mut(&mut self, value: Value) -> Result<(), ()> {
         match *self {
-            GlobalValue::Immutable(ref mut val) => {
+            GlobalValueInner::Immutable(ref mut val) => {
                 if val.r#type() != value.r#type() {
                     return Err(());
                 }
                 *val = value;
             }
-            GlobalValue::Mutable64(ref mut loc, ty) => {
+            GlobalValueInner::Mutable64(ref mut loc, ty) => {
                 *loc.get_mut() = Self::make_64_bit(value, ty)?
             }
-            GlobalValue::Mutable128(ref mut loc) => {
+            GlobalValueInner::Mutable128(ref mut loc) => {
                 let Value::V128(val_128) = value else {
                     return Err(());
                 };
@@ -282,12 +287,12 @@ impl GlobalValue {
 
     fn store(&self, value: Value) -> Result<(), ()> {
         match *self {
-            GlobalValue::Immutable(_) => Err(()),
-            GlobalValue::Mutable64(ref loc, ty) => {
+            GlobalValueInner::Immutable(_) => Err(()),
+            GlobalValueInner::Mutable64(ref loc, ty) => {
                 loc.store(Self::make_64_bit(value, ty)?, Ordering::Release);
                 Ok(())
             }
-            GlobalValue::Mutable128(ref loc) => {
+            GlobalValueInner::Mutable128(ref loc) => {
                 let Value::V128(val_128) = value else {
                     return Err(());
                 };
@@ -299,8 +304,8 @@ impl GlobalValue {
 
     fn load(&self) -> Value {
         match *self {
-            GlobalValue::Immutable(val) => val,
-            GlobalValue::Mutable64(ref loc, ty) => {
+            GlobalValueInner::Immutable(val) => val,
+            GlobalValueInner::Mutable64(ref loc, ty) => {
                 let bits = loc.load(Ordering::Acquire);
                 match ty {
                     Mut64Type::I64 => Value::I64(bits),
@@ -316,17 +321,17 @@ impl GlobalValue {
                     }
                 }
             }
-            GlobalValue::Mutable128(ref loc) => Value::V128(loc.load()),
+            GlobalValueInner::Mutable128(ref loc) => Value::V128(loc.load()),
         }
     }
 
     fn r#type(&self) -> GlobalType {
         match *self {
-            GlobalValue::Immutable(val) => GlobalType {
+            GlobalValueInner::Immutable(val) => GlobalType {
                 mutable: false,
                 value_type: val.r#type(),
             },
-            GlobalValue::Mutable64(_, ty) => {
+            GlobalValueInner::Mutable64(_, ty) => {
                 let value_type = match ty {
                     Mut64Type::Ref(ref_ty) => ValueType::ReferenceType(ref_ty),
                     Mut64Type::I32 => NumericType::I32.into(),
@@ -339,11 +344,34 @@ impl GlobalValue {
                     value_type,
                 }
             }
-            GlobalValue::Mutable128(_) => GlobalType {
+            GlobalValueInner::Mutable128(_) => GlobalType {
                 mutable: true,
                 value_type: NumericType::V128.into(),
             },
         }
+    }
+}
+
+#[repr(transparent)]
+pub struct GlobalValueRef<'a>(&'a GlobalValueInner);
+
+#[derive(Debug, Error)]
+#[error("the global is immutable and therefore can't be changed")]
+pub struct ImmutableGlobalError(());
+
+impl GlobalValueRef<'_> {
+    pub fn store(&self, value: Value) -> Result<(), ImmutableGlobalError> {
+        self.0.store(value).map_err(|()| ImmutableGlobalError(()))
+    }
+
+    pub fn load(&self) -> Value {
+        self.0.load()
+    }
+}
+
+impl Debug for GlobalValueRef<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("GlobalValue").field(&self.load()).finish()
     }
 }
 
@@ -409,7 +437,7 @@ pub struct WasmVirtualMachine {
     functions: WasmVec<FunctionInner>,
     tables: WasmVec<Table>,
     memory: WasmVec<MemoryBuffer>,
-    globals: WasmVec<GlobalValue>,
+    globals: WasmVec<GlobalValueInner>,
     data: WasmVec<Data>,
     element: WasmVec<Element>,
     start: Option<FunctionIndex>,
@@ -436,13 +464,32 @@ impl Import {
     pub fn function<In: FunctionInput, Out: FunctionOutput>(
         fun: impl Fn(In) -> Out + Send + Sync + 'static,
     ) -> Self {
+        Import::function_full(move |input, _| fun(input))
+    }
+
+    pub fn function_with_mem<In: FunctionInput, Out: FunctionOutput>(
+        fun: impl Fn(In, &MemoryBuffer) -> Out + Send + Sync + 'static,
+    ) -> Self {
+        Import::function_full(move |input, context| {
+            fun(
+                input,
+                context
+                    .mem(MemoryIndex::ZERO)
+                    .expect("wasm module didn't contain memory"),
+            )
+        })
+    }
+
+    pub(crate) fn function_full<In: FunctionInput, Out: FunctionOutput>(
+        fun: impl Fn(In, &mut WasmContext) -> Out + Send + Sync + 'static,
+    ) -> Self {
         let function = Box::new(move |context: &mut WasmContext| {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
                 let input = In::get(context.stack);
-                let output = fun(input);
+                let output = fun(input, context);
                 Out::push(output, context.stack)
             }))
-                .map_err(|_| Trap::new())
+            .map_err(|_| Trap::new())
         });
         let signature = NativeFunctionSignature {
             input: In::subtype,
@@ -469,7 +516,10 @@ struct Resolve {
 type Constructor = Box<dyn FnOnce(&mut WasmVirtualMachine) -> anyhow::Result<()>>;
 
 fn validate_vm(vm: &WasmVirtualMachine) -> anyhow::Result<()> {
-    if vm.start.is_some_and(|func| vm.get_typed_function::<(), ()>(func).is_err()) {
+    if vm
+        .start
+        .is_some_and(|func| vm.get_typed_function::<(), ()>(func).is_err())
+    {
         return Err(invalid_data("invalid start function index"));
     }
 
@@ -492,17 +542,17 @@ impl WasmVirtualMachine {
     #[allow(clippy::too_many_arguments)]
     fn create(
         types: WasmVec<TypeInfo>,
-        functions: impl IntoIterator<Item=FunctionInner>,
-        tables: impl IntoIterator<Item=Table>,
-        memory: impl IntoIterator<Item=MemoryBuffer>,
+        functions: impl IntoIterator<Item = FunctionInner>,
+        tables: impl IntoIterator<Item = Table>,
+        memory: impl IntoIterator<Item = MemoryBuffer>,
         exports: HashMap<Box<str>, ExportDescription>,
-        global_stubs: impl IntoIterator<Item=GlobalValue>,
-        data: impl IntoIterator<Item=Data>,
-        element: impl IntoIterator<Item=Element>,
+        global_stubs: impl IntoIterator<Item = GlobalValueInner>,
+        data: impl IntoIterator<Item = Data>,
+        element: impl IntoIterator<Item = Element>,
         start: Option<FunctionIndex>,
-        constructors: impl IntoIterator<Item=Constructor>,
+        constructors: impl IntoIterator<Item = Constructor>,
     ) -> anyhow::Result<Self> {
-        fn collect_wasm_vec<T>(it: impl IntoIterator<Item=T>) -> anyhow::Result<WasmVec<T>> {
+        fn collect_wasm_vec<T>(it: impl IntoIterator<Item = T>) -> anyhow::Result<WasmVec<T>> {
             WasmVec::try_from(it.into_iter().collect::<Box<[_]>>())
                 .map_err(|_| invalid_data("too many functions in store"))
         }
@@ -572,7 +622,7 @@ impl WasmVirtualMachine {
 
                         if !(signature.input)(&import_type.parameters) || !(signature.output)(&import_type.result) {
                             return Err(invalid_data(format!(
-                                "invalid function [{module}]::[{name}] signature, expected {import_type:?}"
+                                "invalid function [{module}]::[{name}] signature, expected {import_type}"
                             )));
                         }
 
@@ -583,7 +633,7 @@ impl WasmVirtualMachine {
                         (Some(func), None, None)
                     }
                     (ImportDescription::Global(_), ImportInner::Global(value)) => {
-                        (None, Some(GlobalValue::Immutable(value)), None)
+                        (None, Some(GlobalValueInner::Immutable(value)), None)
                     }
                     (ImportDescription::Memory(imposed_limit), ImportInner::Memory(buffer)) => {
                         if imposed_limit.min > buffer.min() && imposed_limit.max > buffer.max() {
@@ -599,45 +649,50 @@ impl WasmVirtualMachine {
         let wasm_defined_globals = sections.global.map(|glob| glob.globals).unwrap_or_default();
 
         let globals_signatures = vector_from_vec(
-            imported_globals.iter()
+            imported_globals
+                .iter()
                 .flatten()
                 .map(|glob| glob.r#type())
                 .chain(wasm_defined_globals.iter().map(|glob| glob.r#type))
-                .collect()
+                .collect(),
         )?;
 
         let function_signatures = vector_from_vec(
-            imported_functions.iter()
+            imported_functions
+                .iter()
                 .flatten()
                 .map(|func| func.r#type)
                 .chain(wasm_function_types.iter().copied())
-                .collect()
+                .collect(),
         )?;
 
-        let tables = sections.table
+        let tables = sections
+            .table
             .as_ref()
             .map(|sec| &sec.tables)
             .unwrap_or(const { &WasmVec::new() });
 
-        let mut compiler = WasmCompilationContext::new(
-            &globals_signatures,
-            &function_signatures,
-            &types,
-            tables,
-        );
+        let mut compiler =
+            WasmCompilationContext::new(&globals_signatures, &function_signatures, &types, tables);
 
-        let functions = imported_functions.into_iter().flatten().map(anyhow::Ok).chain(
-            wasm_defined_functions
-                .into_iter()
-                .zip(wasm_function_types)
-                .map(|(def, r#type)| Ok(FunctionInner {
-                    r#type,
-                    body: Body::WasmDefined(WasmFunction {
-                        locals: def.locals.clone(),
-                        body: FunctionBody::new(def, r#type, &mut compiler)?,
+        let functions = imported_functions
+            .into_iter()
+            .flatten()
+            .map(anyhow::Ok)
+            .chain(
+                wasm_defined_functions
+                    .into_iter()
+                    .zip(wasm_function_types)
+                    .map(|(def, r#type)| {
+                        Ok(FunctionInner {
+                            r#type,
+                            body: Body::WasmDefined(WasmFunction {
+                                locals: def.locals.clone(),
+                                body: FunctionBody::new(def, r#type, &mut compiler)?,
+                            }),
+                        })
                     }),
-                })),
-        );
+            );
 
         let functions = vector_from_vec(functions.collect::<anyhow::Result<_>>()?)?;
 
@@ -648,7 +703,7 @@ impl WasmVirtualMachine {
             .chain(
                 wasm_defined_globals
                     .into_iter()
-                    .map(|glob| (Some(glob.expression), GlobalValue::new(glob.r#type))),
+                    .map(|glob| (Some(glob.expression), GlobalValueInner::new(glob.r#type))),
             )
             .unzip::<_, _, Vec<_>, Vec<_>>();
 
@@ -683,7 +738,8 @@ impl WasmVirtualMachine {
                 .const_eval(this)
                 .ok_or_else(|| invalid_data("active element offset not available in const"))
                 .and_then(|val| {
-                    <Index as ValueInner>::from(val).ok_or_else(|| invalid_data("invalid offset type"))
+                    <Index as ValueInner>::from(val)
+                        .ok_or_else(|| invalid_data("invalid offset type"))
                 })
         };
 
@@ -705,7 +761,6 @@ impl WasmVirtualMachine {
                 Ok(())
             }};
         }
-
 
         let memory_setter = move |this: &mut WasmVirtualMachine| {
             init_active_segment!(this, data, |memory_index, offset| {
@@ -793,10 +848,22 @@ impl WasmVirtualMachine {
 
     pub fn with_imports<'a, S1: Into<Cow<'a, str>>, S2: Into<Cow<'a, str>>>(
         binary: WasmBinary,
-        imports: impl IntoIterator<Item=((S1, S2), Import)>,
+        imports: impl IntoIterator<Item = ((S1, S2), Import)>,
     ) -> anyhow::Result<Self> {
         let prelude_imports = match binary.version {
-            WasmVersion::Version1 => iter::empty(),
+            WasmVersion::Version1 => {
+                wasi_snapshot_preview1::import_object()
+                    .into_iter()
+                    .map(|(name, import)| {
+                        (
+                            (Cow::Borrowed("wasi_snapshot_preview1"), Cow::Borrowed(name)),
+                            Resolve {
+                                import: import.0,
+                                prelude: true,
+                            },
+                        )
+                    })
+            }
         };
 
         let imports = imports.into_iter().map(|((s1, s2), i)| {
@@ -832,14 +899,6 @@ impl WasmVirtualMachine {
 }
 
 impl WasmVirtualMachine {
-    pub(crate) fn get_type_output(&self, r#type: TypeIndex) -> Option<&[ValueType]> {
-        self.types.get(r#type.0).map(|ty| &*ty.result)
-    }
-
-    pub(crate) fn get_type_input(&self, r#type: TypeIndex) -> Option<&[ValueType]> {
-        self.types.get(r#type.0).map(|ty| &*ty.parameters)
-    }
-
     pub(crate) fn load_global(&self, local: GlobalIndex) -> Option<Value> {
         self.globals.get(local.0).map(|glob| glob.load())
     }
@@ -879,7 +938,7 @@ impl WasmVirtualMachine {
                     .collect::<Box<[_]>>();
                 WasmVec::from_trusted_box(locals)
             }
-            Body::Import(_) => const { WasmVec::new() }
+            Body::Import(_) => const { WasmVec::new() },
         };
 
         let mut context = WasmContext {
@@ -918,7 +977,6 @@ macro_rules! get_export {
             })
     };
 }
-
 
 pub struct UntypedFunction<'a> {
     vm: &'a WasmVirtualMachine,
@@ -959,12 +1017,17 @@ pub struct MismatchedFunctionType {
 }
 
 impl<'a> UntypedFunction<'a> {
-    pub fn cast<T: FunctionInput, U: FunctionOutput>(self) -> Result<Function<'a, T, U>, MismatchedFunctionType> {
+    pub fn cast<T: FunctionInput, U: FunctionOutput>(
+        self,
+    ) -> Result<Function<'a, T, U>, MismatchedFunctionType> {
         let r#type = self.vm.types.get(self.function.r#type.0).unwrap();
 
         if !T::subtype(&r#type.parameters) || !U::subtype(&r#type.result) {
             return Err(MismatchedFunctionType {
-                msg: format!("expected {type}, found {}", parameter::fmt_fn_signature::<T, U>())
+                msg: format!(
+                    "expected {type}, found {}",
+                    parameter::fmt_fn_signature::<T, U>()
+                ),
             });
         }
 
@@ -992,7 +1055,6 @@ pub enum CallError {
     GetFunctionError(#[from] GetFunctionError),
 }
 
-
 macro_rules! define_resource_getters {
     (
         $resource_type:ident, $capitalized_resource:ty, $return_type:ty,
@@ -1018,37 +1080,33 @@ macro_rules! define_resource_getters {
 
 impl WasmVirtualMachine {
     define_resource_getters!(
-        function, Function, UntypedFunction,
+        function,
+        Function,
+        UntypedFunction,
         functions,
         "function",
-        |this, function| UntypedFunction {
-            vm: this,
-            function,
-        }
+        |this, function| UntypedFunction { vm: this, function }
     );
 
-    define_resource_getters!(
-        table, Table, &Table,
-        tables,
-        "memory"
-    );
+    define_resource_getters!(table, Table, &Table, tables, "memory");
+
+    define_resource_getters!(memory, Memory, &MemoryBuffer, memory, "memory");
 
     define_resource_getters!(
-        memory, Memory, &MemoryBuffer,
-        memory,
-        "memory"
-    );
-
-    define_resource_getters!(
-        global, Global, &GlobalValue,
+        global,
+        Global,
+        GlobalValueRef,
         globals,
-        "memory"
+        "memory",
+        |_, global| GlobalValueRef(global)
     );
 
-
-    pub fn get_typed_function<T: FunctionInput, U: FunctionOutput>(&self, function: FunctionIndex) -> Result<Function<T, U>, GetFunctionError> {
+    pub fn get_typed_function<T: FunctionInput, U: FunctionOutput>(
+        &self,
+        function: FunctionIndex,
+    ) -> Result<Function<T, U>, GetFunctionError> {
         let Some(function) = self.get_function(function) else {
-            return Err(GetFunctionError::FunctionDoesntExist)
+            return Err(GetFunctionError::FunctionDoesntExist);
         };
 
         function.cast().map_err(Into::into)
@@ -1062,8 +1120,10 @@ impl WasmVirtualMachine {
             .ok_or(GetFunctionError::FunctionDoesntExist)?;
 
         match self.get_typed_function(func) {
-            Err(GetFunctionError::FunctionDoesntExist) => unreachable!("checked by validation that the exports exist"),
-            res => res
+            Err(GetFunctionError::FunctionDoesntExist) => {
+                unreachable!("checked by validation that the exports exist")
+            }
+            res => res,
         }
     }
 
@@ -1072,7 +1132,9 @@ impl WasmVirtualMachine {
         function: FunctionIndex,
         parameter: T,
     ) -> Result<U, CallError> {
-        self.get_typed_function(function)?.call(parameter).map_err(CallError::Trap)
+        self.get_typed_function(function)?
+            .call(parameter)
+            .map_err(CallError::Trap)
     }
 
     pub fn call_by_name<T: FunctionInput, U: FunctionOutput>(
@@ -1080,7 +1142,9 @@ impl WasmVirtualMachine {
         function: &str,
         parameter: T,
     ) -> Result<U, CallError> {
-        self.get_typed_function_by_name(function)?.call(parameter).map_err(CallError::Trap)
+        self.get_typed_function_by_name(function)?
+            .call(parameter)
+            .map_err(CallError::Trap)
     }
 
     pub fn start(&self) -> Result<(), CallError> {
@@ -1090,18 +1154,6 @@ impl WasmVirtualMachine {
 
         self.call_by_name("main", ())
     }
-}
-
-struct Frame {
-    locals: WasmVec<ValueType>,
-    labels: u32,
-}
-
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub(crate) struct StackFrame {
-    pub(crate) return_amount: Index,
-    pub(crate) return_address: Index,
 }
 
 pub struct WasmContext<'a> {
@@ -1128,14 +1180,6 @@ impl<'a> WasmContext<'a> {
 
     pub(crate) fn get_function(&self, function: FunctionIndex) -> Option<&'a FunctionInner> {
         self.virtual_machine.functions.get(function.0)
-    }
-
-    pub(crate) fn get_type_output(&self, r#type: TypeIndex) -> Option<&'a [ValueType]> {
-        self.virtual_machine.get_type_output(r#type)
-    }
-
-    pub(crate) fn get_type_input(&self, r#type: TypeIndex) -> Option<&'a [ValueType]> {
-        self.virtual_machine.get_type_input(r#type)
     }
 
     pub(crate) fn get_local(&mut self, local: LocalIndex) -> Option<&mut Value> {
@@ -1171,7 +1215,8 @@ impl<'a> WasmContext<'a> {
         argument: MemoryArgument,
         index: Index,
     ) -> Result<T, MemoryFault> {
-        self.mem(mem_index).and_then(|mem| mem.load_internal(argument, index))
+        self.mem(mem_index)
+            .and_then(|mem| mem.load_internal(argument, index))
     }
 
     pub(crate) fn mem_store<T: Pod>(
@@ -1181,7 +1226,8 @@ impl<'a> WasmContext<'a> {
         index: Index,
         value: &T,
     ) -> Result<(), MemoryFault> {
-        self.mem(mem_index).and_then(|mem| mem.store_internal(argument, index, value))
+        self.mem(mem_index)
+            .and_then(|mem| mem.store_internal(argument, index, value))
     }
 
     pub(crate) fn mem_grow(&self, mem_index: MemoryIndex, by: Index) -> Result<Index, MemoryError> {
@@ -1190,18 +1236,48 @@ impl<'a> WasmContext<'a> {
             .and_then(|mem| mem.grow(by).map_err(MemoryError::from))
     }
 
-    pub(crate) fn mem_init(&self, mem_index: MemoryIndex, offset: Index, data: DataIndex, data_offset: Index, n: Index) -> Result<(), MemoryFault> {
-        let data = self.virtual_machine.data.get(data.0).ok_or_else(MemoryFault::new)?;
-        let data_end = data_offset.0.checked_add(n.0).map(Index).ok_or_else(MemoryFault::new)?;
-        let data = (*data.init).get(data_offset.as_usize()..data_end.as_usize()).ok_or_else(MemoryFault::new)?;
+    pub(crate) fn mem_init(
+        &self,
+        mem_index: MemoryIndex,
+        offset: Index,
+        data: DataIndex,
+        data_offset: Index,
+        n: Index,
+    ) -> Result<(), MemoryFault> {
+        let data = self
+            .virtual_machine
+            .data
+            .get(data.0)
+            .ok_or_else(MemoryFault::new)?;
+        let data_end = data_offset
+            .0
+            .checked_add(n.0)
+            .map(Index)
+            .ok_or_else(MemoryFault::new)?;
+        let data = (*data.init)
+            .get(data_offset.as_usize()..data_end.as_usize())
+            .ok_or_else(MemoryFault::new)?;
         self.mem(mem_index).and_then(|mem| mem.init(offset, data))
     }
 
-    pub(crate) fn mem_fill(&self, mem_index: MemoryIndex, offset: Index, value: u8, n: Index) -> Result<(), MemoryFault> {
-        self.mem(mem_index).and_then(|mem| mem.fill(offset, n, value))
+    pub(crate) fn mem_fill(
+        &self,
+        mem_index: MemoryIndex,
+        offset: Index,
+        value: u8,
+        n: Index,
+    ) -> Result<(), MemoryFault> {
+        self.mem(mem_index)
+            .and_then(|mem| mem.fill(offset, n, value))
     }
 
-    pub(crate) fn mem_copy(&self, mem_index: MemoryIndex, dest: Index, src: Index, n: Index) -> Result<(), MemoryFault> {
+    pub(crate) fn mem_copy(
+        &self,
+        mem_index: MemoryIndex,
+        dest: Index,
+        src: Index,
+        n: Index,
+    ) -> Result<(), MemoryFault> {
         self.mem(mem_index).and_then(|mem| mem.copy(src, dest, n))
     }
 
