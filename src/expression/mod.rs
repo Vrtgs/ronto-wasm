@@ -13,8 +13,8 @@ use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryFault;
 use crate::runtime::parameter::sealed::SealedInput;
 use crate::runtime::{ReferenceValue, Trap, Value, WasmContext};
-use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::{invalid_data, Stack, WasmVirtualMachine};
+use crate::vector::{Index, WasmVec, vector_from_vec};
+use crate::{Stack, WasmVirtualMachine, invalid_data};
 use anyhow::ensure;
 use std::cmp::PartialEq;
 use std::io::Read;
@@ -273,9 +273,9 @@ impl Compile for ParametricInstruction {
             ParametricInstruction::SelectT(Optional(None)) | ParametricInstruction::Select => {
                 let Some(
                     [
-                    ValueType::NumericType(ty1),
-                    ValueType::NumericType(ty2),
-                    ValueType::NumericType(NumericType::I32),
+                        ValueType::NumericType(ty1),
+                        ValueType::NumericType(ty2),
+                        ValueType::NumericType(NumericType::I32),
                     ],
                 ) = compiler.pop_n()
                 else {
@@ -433,11 +433,11 @@ impl ActiveCompilation<'_, '_> {
         let label = self.labels.pop().unwrap();
         let valid_label_return = self.hit_unreachable()
             || (Some(self.values.len())
-            == label
-            .return_address
-            .as_usize()
-            .checked_add(label.output.len())
-            && self.is_slice_top(&label.output));
+                == label
+                    .return_address
+                    .as_usize()
+                    .checked_add(label.output.len())
+                && self.is_slice_top(&label.output));
 
         ensure!(valid_label_return, "invalid label output");
         Ok(label)
@@ -499,7 +499,7 @@ impl<'a> WasmCompilationContext<'a> {
                 .chain(function.locals)
                 .collect::<Box<[_]>>(),
         )
-            .map_err(|_| invalid_data("too many parameters and locals in function"))?;
+        .map_err(|_| invalid_data("too many parameters and locals in function"))?;
 
         Ok((
             function.body,
@@ -525,7 +525,6 @@ impl<'a> WasmCompilationContext<'a> {
 mod stage1_compile;
 mod stage2_compile;
 mod stage3_compile;
-
 
 impl FunctionBody {
     pub fn new(

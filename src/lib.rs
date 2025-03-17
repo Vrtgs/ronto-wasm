@@ -10,7 +10,7 @@ mod read_tape;
 pub mod runtime;
 mod vector;
 
-pub use parser::parse_file;
+pub use parser::parse_module;
 pub use runtime::WasmVirtualMachine;
 pub use vector::Index;
 
@@ -46,14 +46,16 @@ pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyh
 
 #[cfg(test)]
 mod tests {
-    use crate::parse_file;
+    use crate::parse_module;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
     use crate::runtime::{CallError, GetFunctionError, WasmVirtualMachine};
     use crate::vector::Index;
+    use anyhow::bail;
     use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
     use bytemuck::{Pod, Zeroable};
     use image::GenericImageView;
+    use std::ffi::OsStr;
     use std::fmt::Debug;
     use std::fs::File;
     use std::io;
@@ -62,11 +64,13 @@ mod tests {
     use wasm_testsuite::data::SpecVersion;
 
     fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<WasmVirtualMachine> {
-        WasmVirtualMachine::new(parse_file(File::open(
-            Path::new("./test-files/test-modules")
-                .join(path)
-                .with_extension("wasm"),
-        )?)?)
+        let prefix = match path.as_ref().extension().map(OsStr::as_encoded_bytes) {
+            Some(b"wast" | b"wat") => Path::new("./test-files/hardcoded-tests"),
+            Some(b"wasm") => Path::new("./test-files/test-modules"),
+            _ => bail!("unknown wasm test module")
+        };
+
+        WasmVirtualMachine::new(parse_module(File::open(prefix.join(path))?)?)
     }
 
     fn test<In: FunctionInput, Out: FunctionOutput + PartialEq + Debug>(
@@ -83,29 +87,22 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn fib() {
-        test("fib", "fib", 24_i32, 75025_i64).unwrap();
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn fib_rust() {
-        test("fib-rust", "fib", 24_i32, 75025_i64).unwrap();
+        for test_module in ["fib.wast", "fib-rust.wasm"] {
+            test(test_module, "fib", 24_i32, 75025_i64).unwrap();
+        }
     }
 
     #[test]
     fn factorial() {
-        test("factorial", "fac", 5.0_f64, 120.0_f64).unwrap();
-    }
-
-    #[test]
-    fn rust_factorial() {
-        test("rust-factorial", "factorial", 5_i32, 120_i64).unwrap();
+        for test_module in ["factorial.wast", "rust-factorial.wasm"] {
+            test(test_module, "factorial", 5_i32, 120_i64).unwrap();
+        }
     }
 
     #[test]
     fn to_double_digits() {
         test(
-            "to_double_digit",
+            "to_double_digit.wasm",
             "to_double_digit",
             ('7' as u32, '8' as u32),
             78_u32,
@@ -115,23 +112,23 @@ mod tests {
 
     #[test]
     fn double_args() {
-        test("test_double_arguments", "first_arg", (7_u32, 8_u32), 7_u32).unwrap();
-        test("test_double_arguments", "second_arg", (7_u32, 8_u32), 8_u32).unwrap();
+        test("test_double_arguments.wast", "first_arg", (7_u32, 8_u32), 7_u32).unwrap();
+        test("test_double_arguments.wast", "second_arg", (7_u32, 8_u32), 8_u32).unwrap();
     }
 
     #[test]
     fn rotate_tests() {
-        test("rot", "rotl", (0x12345678_u32, 8_u32), 0x34567812_u32).unwrap();
-        test("rot", "rotr", (0x12345678_u32, 8_u32), 0x78123456_u32).unwrap();
+        test("rot.wast", "rotl", (0x12345678_u32, 8_u32), 0x34567812_u32).unwrap();
+        test("rot.wast", "rotr", (0x12345678_u32, 8_u32), 0x78123456_u32).unwrap();
         test(
-            "rot",
+            "rot.wast",
             "rotl64",
             (0x123456789ABCDEF0_u64, 16_u64),
             0x56789ABCDEF01234_u64,
         )
             .unwrap();
         test(
-            "rot",
+            "rot.wast",
             "rotr64",
             (0x123456789ABCDEF0_u64, 16_u64),
             0xDEF0123456789ABC_u64,
@@ -141,17 +138,17 @@ mod tests {
 
     #[test]
     fn select_t() {
-        test("select_t", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64).unwrap();
-        test("select_t", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64).unwrap();
+        test("select_t.wast", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64).unwrap();
+        test("select_t.wast", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64).unwrap();
         test(
-            "select_t",
+            "select_t.wast",
             "explicit_select",
             (9.11_f64, 69.0_f64, 1_i32),
             9.11_f64,
         )
             .unwrap();
         test(
-            "select_t",
+            "select_t.wast",
             "explicit_select",
             (9.11_f64, 69.0_f64, 0_i32),
             69.0_f64,
@@ -163,7 +160,7 @@ mod tests {
     fn mismatched_type() {
         assert!(matches!(
             test(
-                "select_t",
+                "select_t.wast",
                 "implicit_select",
                 (7_i64, 8_i64, 1_i32),
                 7.0_f64
@@ -176,7 +173,7 @@ mod tests {
 
     #[test]
     fn cstr() -> anyhow::Result<()> {
-        let vm = get_vm("test_cstr")?;
+        let vm = get_vm("test_cstr.wasm")?;
         let ptr = vm.call_by_name::<(), Index>("get_cstr", ())?;
         let mem = vm.get_memory_by_name("memory").unwrap();
         let cstr = mem.load_ctr(ptr)?;
@@ -186,7 +183,7 @@ mod tests {
 
     #[test]
     fn make_cstr() -> anyhow::Result<()> {
-        let vm = get_vm("make_cstr")?;
+        let vm = get_vm("make_cstr.wasm")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
         for original in [c"FOO", c"BAR", cr###"{ "yay_son": "json" }"###] {
@@ -212,7 +209,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn base64_encode() -> anyhow::Result<()> {
-        let vm = get_vm("encode_base64")?;
+        let vm = get_vm("encode_base64.wasm")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
         let data = std::array::from_fn::<_, 12, _>(|i| {
@@ -245,7 +242,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn png_decode() -> anyhow::Result<()> {
-        let vm = get_vm("decode_image")?;
+        let vm = get_vm("decode_image.wasm")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
         for image in std::fs::read_dir("./test-files/assets/images")? {
@@ -273,7 +270,10 @@ mod tests {
                 (result_location, ptr, len),
             )?;
             let elapsed = start.elapsed();
-            eprintln!("decoding took: {elapsed:?}; for image: {}", image_path.display());
+            eprintln!(
+                "decoding took: {elapsed:?}; for image: {}",
+                image_path.display()
+            );
 
             let result_image = mem.load::<Image>(result_location)?;
             assert_eq!(

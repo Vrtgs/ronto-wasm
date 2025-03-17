@@ -1,6 +1,6 @@
-use crate::runtime::memory_buffer::MemoryBuffer;
-use crate::runtime::Import;
 use crate::Index;
+use crate::runtime::Import;
+use crate::runtime::memory_buffer::MemoryBuffer;
 use bytemuck::{Pod, Zeroable};
 use std::convert::Infallible;
 use std::io::{IoSlice, Write};
@@ -58,7 +58,8 @@ pub fn fd_write(
         _ => return WASI_EFAULT,
     };
 
-    mem.store(ptr_written, &(written as u32)).map_or(WASI_EFAULT, |()| WASI_ESUCCESS)
+    mem.store(ptr_written, &(written as u32))
+        .map_or(WASI_EFAULT, |()| WASI_ESUCCESS)
 }
 
 pub fn sched_yield(_: ()) -> u32 {
@@ -93,7 +94,7 @@ pub fn random_get((ptr, len): (Index, Index), mem: &MemoryBuffer) -> u32 {
     err.map_or(WASI_ESUCCESS, |_| WASI_EFAULT)
 }
 
-pub fn import_object() -> impl IntoIterator<Item=(&'static str, Import)> {
+pub fn import_object() -> impl IntoIterator<Item = (&'static str, Import)> {
     macro_rules! imports {
         ([$($name:ident $(w/mem $(@$mem:tt)?)? ),+ $(,)?]) => {
             [$((stringify!($name), paste::paste!(Import::[<function $(_with_mem $(@$mem)?)?>]($name)))),*]

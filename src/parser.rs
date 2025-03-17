@@ -1,6 +1,6 @@
 use crate::expression::Expression;
 use crate::read_tape::ReadTape;
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use std::any::type_name;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Read;
@@ -742,7 +742,7 @@ decodable! {
 
 use crate::invalid_data;
 use crate::runtime::parameter::fmt_ty_vec;
-use crate::vector::{Index, WasmVec, vector_from_vec};
+use crate::vector::{vector_from_vec, Index, WasmVec};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -782,9 +782,8 @@ pub struct WasmBinary {
     pub sections: WasmSections,
 }
 
-impl Decode for WasmBinary {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        expect!(file.read_chunk()? == *b"\0asm", "invalid magic bytes")?;
+impl WasmBinary {
+    fn decode_no_magic(file: &mut ReadTape<impl Read>) -> Result<Self> {
         let version = WasmVersion::decode(file)?;
         let mut custom_sections = vec![];
         let mut sections = WasmSections {
@@ -843,10 +842,25 @@ impl Decode for WasmBinary {
     }
 }
 
+impl Decode for WasmBinary {
+    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+        let magic = file.read_chunk()?;
+        if magic != *b"\0asm" {
+            file.put_chunk(magic);
+            let module = file.read_to_string()?;
+            let mut module = ReadTape::memory_buffer(wat::parse_str(&module)?);
+            ensure!(module.read_chunk()? == *b"\0asm", "invalid wasm module output from the `wat` crate; please file a bug report");
+
+            return WasmBinary::decode_no_magic(&mut module);
+        }
+        WasmBinary::decode_no_magic(file)
+    }
+}
+
 pub(crate) fn decode(mut reader: ReadTape<impl Read>) -> Result<WasmBinary> {
     WasmBinary::decode(&mut reader)
 }
 
-pub fn parse_file(file: impl Read) -> Result<WasmBinary> {
+pub fn parse_module(file: impl Read) -> Result<WasmBinary> {
     decode(ReadTape::new(file))
 }

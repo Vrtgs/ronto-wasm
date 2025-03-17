@@ -1,6 +1,6 @@
 use super::instruction_code::{
-    access_type, AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit,
-    Primitive, RefNull, VariableAccess,
+    AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit, Primitive,
+    RefNull, VariableAccess, access_type,
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::invalid_data;

@@ -76,6 +76,10 @@ impl<R: Read> ReadTape<R> {
         Ok(unsafe { buff.assume_init() })
     }
 
+    pub fn put_chunk<const N: usize>(&mut self, chunk: [u8; N]) {
+        chunk.into_iter().rev().for_each(|byte| self.scratch.push_front(byte))
+    }
+
     pub fn read_byte(&mut self) -> io::Result<u8> {
         self.fill_buff(1)?;
         Ok(self
@@ -98,6 +102,12 @@ impl<R: Read> ReadTape<R> {
         self.read_exact(&mut buff)?;
         // buff has been filled if the call to self.read_exact succeeds
         Ok(unsafe { buff.assume_init() })
+    }
+
+    pub fn read_to_string(&mut self) -> io::Result<String> {
+        let mut data = String::from_utf8(Vec::from(std::mem::take(&mut self.scratch)))
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        self.reader.read_to_string(&mut data).map(|_| data)
     }
 
     pub fn has_data(&mut self) -> io::Result<bool> {
