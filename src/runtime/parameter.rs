@@ -1,10 +1,10 @@
 #![allow(private_interfaces)]
 
-use crate::Stack;
 use crate::expression::ActiveCompilation;
 use crate::parser::ValueType;
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::{Value, ValueInner};
+use crate::Stack;
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::iter;
@@ -15,7 +15,7 @@ trait Parameter: Sized + 'static {
 
     fn from_stack(stack: &mut Vec<Value>) -> Option<Self>;
 
-    fn into_values(self) -> impl IntoIterator<Item = Value>;
+    fn into_values(self) -> impl IntoIterator<Item=Value>;
 }
 
 pub(crate) mod sealed {
@@ -32,10 +32,8 @@ pub(crate) mod sealed {
         fn get_from_compiler(compiler: &mut ActiveCompilation) -> bool;
         fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
         fn get(stack: &mut Vec<Value>) -> Self {
-            let prev = format!("{stack:?}");
-            Self::get_checked(stack).unwrap_or_else(|| {
-                panic!("{prev} validation should make sure we never get a value from the stack if it doesn't exist, or has a mismatched type")
-            })
+            Self::get_checked(stack)
+                .expect("validation should make sure we never get a value from the stack if it doesn't exist, or has a mismatched type")
         }
         fn into_input(self) -> Vec<Value>;
         fn subtype(ty: &[ValueType]) -> bool;
@@ -127,7 +125,7 @@ impl Parameter for () {
         Some(())
     }
 
-    fn into_values(self) -> impl IntoIterator<Item = Value> {
+    fn into_values(self) -> impl IntoIterator<Item=Value> {
         iter::empty()
     }
 }
@@ -163,7 +161,7 @@ impl<T: ValueInner> Parameter for T {
         stack.pop().and_then(T::from)
     }
 
-    fn into_values(self) -> impl IntoIterator<Item = Value> {
+    fn into_values(self) -> impl IntoIterator<Item=Value> {
         iter::once(self.into())
     }
 }

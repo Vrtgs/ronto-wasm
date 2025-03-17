@@ -260,7 +260,7 @@ impl MemoryBuffer {
         })
     }
 
-    pub fn fill_with(
+    pub(crate) fn fill_with(
         &self,
         addr: Index,
         size: Index,

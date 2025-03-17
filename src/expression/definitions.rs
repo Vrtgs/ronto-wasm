@@ -1,6 +1,6 @@
 use super::instruction_code::{
-    AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit, Primitive,
-    RefNull, VariableAccess, access_type,
+    access_type, AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit,
+    Primitive, RefNull, VariableAccess,
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::invalid_data;
@@ -701,8 +701,8 @@ instruction! {
         // Memory Instructions
 
         // Primitive load
-        ("i32.load",        I32Load) => 0x28 (MemoryArgument) code: load!(i32),
-        ("i64.load",        I64Load) => 0x29 (MemoryArgument) code: load!(i64),
+        ("i32.load",        I32Load) => 0x28 (MemoryArgument) code: load!(u32),
+        ("i64.load",        I64Load) => 0x29 (MemoryArgument) code: load!(u64),
         ("f32.load",        F32Load) => 0x2a (MemoryArgument) code: load!(f32),
         ("f64.load",        F64Load) => 0x2b (MemoryArgument) code: load!(f64),
 
@@ -712,7 +712,7 @@ instruction! {
         ("i32.load8_s",   I32LoadI8) => 0x2c (MemoryArgument) code: load!(i32 <==  i8),
         ("i32.load8_u",   I32LoadU8) => 0x2d (MemoryArgument) code: load!(i32 <==  u8),
         ("i32.load16_s", I32LoadI16) => 0x2e (MemoryArgument) code: load!(i32 <== i16),
-        ("i32.load16_u", I32LoadU16) => 0x2f (MemoryArgument) code: load!(i32 <== i16),
+        ("i32.load16_u", I32LoadU16) => 0x2f (MemoryArgument) code: load!(i32 <== u16),
 
         // ## i64
         ("i64.load8_s",   I64LoadI8) => 0x30 (MemoryArgument) code: load!(i64 <==  i8),
@@ -731,14 +731,14 @@ instruction! {
         // Casting store
 
         // ## i32
-        ("i32.store8",   I32StoreI8) => 0x3a (MemoryArgument) code: store!(i32 ==>  i8),
-        ("i32.store16", I32StoreI16) => 0x3b (MemoryArgument) code: store!(i32 ==> i16),
+        ("i32.store8",   I32StoreI8) => 0x3a (MemoryArgument) code: store!(i32 ==>  u8),
+        ("i32.store16", I32StoreI16) => 0x3b (MemoryArgument) code: store!(i32 ==> u16),
 
 
         // ## i64
-        ("i64.store8",   I64StoreI8) => 0x3c (MemoryArgument) code: store!(i64 ==>  i8),
-        ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument) code: store!(i64 ==> i16),
-        ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument) code: store!(i64 ==> i32),
+        ("i64.store8",   I64StoreI8) => 0x3c (MemoryArgument) code: store!(i64 ==>  u8),
+        ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument) code: store!(i64 ==> u16),
+        ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument) code: store!(i64 ==> u32),
 
         ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, (), ctx| {
             Ok(ctx.mem_size(MemoryIndex::ZERO)?.0)

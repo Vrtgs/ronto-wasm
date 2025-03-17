@@ -50,14 +50,15 @@ mod tests {
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
     use crate::runtime::{CallError, GetFunctionError, WasmVirtualMachine};
     use crate::vector::Index;
-    use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
+    use base64::Engine;
     use bytemuck::{Pod, Zeroable};
     use image::GenericImageView;
     use std::fmt::Debug;
     use std::fs::File;
     use std::io;
     use std::path::Path;
+    use std::time::Instant;
     use wasm_testsuite::data::SpecVersion;
 
     fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<WasmVirtualMachine> {
@@ -109,7 +110,7 @@ mod tests {
             ('7' as u32, '8' as u32),
             78_u32,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -128,14 +129,14 @@ mod tests {
             (0x123456789ABCDEF0_u64, 16_u64),
             0x56789ABCDEF01234_u64,
         )
-        .unwrap();
+            .unwrap();
         test(
             "rot",
             "rotr64",
             (0x123456789ABCDEF0_u64, 16_u64),
             0xDEF0123456789ABC_u64,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]
@@ -148,14 +149,14 @@ mod tests {
             (9.11_f64, 69.0_f64, 1_i32),
             9.11_f64,
         )
-        .unwrap();
+            .unwrap();
         test(
             "select_t",
             "explicit_select",
             (9.11_f64, 69.0_f64, 0_i32),
             69.0_f64,
         )
-        .unwrap()
+            .unwrap()
     }
 
     #[test]
@@ -248,8 +249,8 @@ mod tests {
         let mem = vm.get_memory_by_name("memory").unwrap();
 
         for image in std::fs::read_dir("./test-files/assets/images")? {
-            let image = image?.path();
-            let image_bytes = std::fs::read(image)?;
+            let image_path = image?.path();
+            let image_bytes = std::fs::read(&image_path)?;
             let image = image::load_from_memory(&image_bytes)?;
 
             let ptr = mem.place_bytes(&image_bytes)?;
@@ -266,10 +267,13 @@ mod tests {
 
             let result_location = mem.place(&Image::zeroed())?;
 
+            let start = Instant::now();
             vm.call_by_name::<(Index, Index, Index), ()>(
                 "decode_image",
                 (result_location, ptr, len),
             )?;
+            let elapsed = start.elapsed();
+            eprintln!("decoding took: {elapsed:?}; for image: {}", image_path.display());
 
             let result_image = mem.load::<Image>(result_location)?;
             assert_eq!(
