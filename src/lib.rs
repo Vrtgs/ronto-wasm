@@ -11,7 +11,7 @@ pub mod runtime;
 mod vector;
 
 pub use parser::parse_module;
-pub use runtime::WasmVirtualMachine;
+pub use runtime::VirtualMachine;
 pub use vector::Index;
 
 pub(crate) trait Stack<T> {
@@ -30,11 +30,14 @@ impl<T> Stack<T> for Vec<T> {
         unsafe {
             let new_len = self.len().unchecked_sub(N);
             std::ptr::copy_nonoverlapping(
-                self.as_ptr().add(new_len),
-                ret.as_mut_ptr().cast::<T>(),
-                N,
+                self.as_ptr().add(new_len).cast::<[T; N]>(),
+                ret.as_mut_ptr(),
+                1,
             );
             self.set_len(new_len);
+            if N > 0 {
+                std::hint::assert_unchecked(self.len() < self.capacity())
+            }
             Some(ret.assume_init())
         }
     }
@@ -48,7 +51,9 @@ pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyh
 mod tests {
     use crate::parse_module;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-    use crate::runtime::{CallError, GetFunctionError, WasmVirtualMachine};
+    use crate::runtime::{
+        wasi_snapshot_preview1, CallError, GetFunctionError, Store, VirtualMachine,
+    };
     use crate::vector::Index;
     use anyhow::bail;
     use base64::prelude::BASE64_STANDARD;
@@ -63,14 +68,18 @@ mod tests {
     use std::time::Instant;
     use wasm_testsuite::data::SpecVersion;
 
-    fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<WasmVirtualMachine> {
+    fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<VirtualMachine> {
         let prefix = match path.as_ref().extension().map(OsStr::as_encoded_bytes) {
             Some(b"wast" | b"wat") => Path::new("./test-files/hardcoded-tests"),
             Some(b"wasm") => Path::new("./test-files/test-modules"),
-            _ => bail!("unknown wasm test module")
+            _ => bail!("unknown wasm test module"),
         };
 
-        WasmVirtualMachine::new(parse_module(File::open(prefix.join(path))?)?)
+        let store = Store::with_linker(
+            parse_module(File::open(prefix.join(path))?)?,
+            &wasi_snapshot_preview1::import_object(),
+        )?;
+        VirtualMachine::new(store)
     }
 
     fn test<In: FunctionInput, Out: FunctionOutput + PartialEq + Debug>(
@@ -112,8 +121,20 @@ mod tests {
 
     #[test]
     fn double_args() {
-        test("test_double_arguments.wast", "first_arg", (7_u32, 8_u32), 7_u32).unwrap();
-        test("test_double_arguments.wast", "second_arg", (7_u32, 8_u32), 8_u32).unwrap();
+        test(
+            "test_double_arguments.wast",
+            "first_arg",
+            (7_u32, 8_u32),
+            7_u32,
+        )
+            .unwrap();
+        test(
+            "test_double_arguments.wast",
+            "second_arg",
+            (7_u32, 8_u32),
+            8_u32,
+        )
+            .unwrap();
     }
 
     #[test]
@@ -138,8 +159,20 @@ mod tests {
 
     #[test]
     fn select_t() {
-        test("select_t.wast", "implicit_select", (7_i64, 8_i64, 1_i32), 7_i64).unwrap();
-        test("select_t.wast", "implicit_select", (7_i64, 8_i64, 0_i32), 8_i64).unwrap();
+        test(
+            "select_t.wast",
+            "implicit_select",
+            (7_i64, 8_i64, 1_i32),
+            7_i64,
+        )
+            .unwrap();
+        test(
+            "select_t.wast",
+            "implicit_select",
+            (7_i64, 8_i64, 0_i32),
+            8_i64,
+        )
+            .unwrap();
         test(
             "select_t.wast",
             "explicit_select",

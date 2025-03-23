@@ -1,10 +1,9 @@
 #![allow(private_interfaces)]
 
-use crate::Stack;
 use crate::expression::ActiveCompilation;
 use crate::parser::ValueType;
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
-use crate::runtime::{Value, ValueInner};
+use crate::runtime::{ValueInner, ValueStack, Word};
 use std::convert::Infallible;
 use std::fmt::{Debug, Display, Formatter};
 use std::iter;
@@ -13,15 +12,15 @@ use std::marker::PhantomData;
 trait Parameter: Sized + 'static {
     const TYPE: &'static [ValueType];
 
-    fn from_stack(stack: &mut Vec<Value>) -> Option<Self>;
+    fn from_stack(stack: &mut ValueStack) -> Option<Self>;
 
-    fn into_values(self) -> impl IntoIterator<Item = Value>;
+    fn into_words(self) -> impl IntoIterator<Item=Word>;
 }
 
 pub(crate) mod sealed {
     use crate::expression::ActiveCompilation;
     use crate::parser::ValueType;
-    use crate::runtime::Value;
+    use crate::runtime::ValueStack;
     use std::fmt::Formatter;
 
     pub trait ArgumentFmt: Sized + 'static {
@@ -30,19 +29,19 @@ pub(crate) mod sealed {
 
     pub trait SealedInput: ArgumentFmt {
         fn get_from_compiler(compiler: &mut ActiveCompilation) -> bool;
-        fn get_checked(stack: &mut Vec<Value>) -> Option<Self>;
-        fn get(stack: &mut Vec<Value>) -> Self {
+        fn get_checked(stack: &mut ValueStack) -> Option<Self>;
+        fn get(stack: &mut ValueStack) -> Self {
             Self::get_checked(stack)
                 .expect("validation should make sure we never get a value from the stack if it doesn't exist, or has a mismatched type")
         }
-        fn into_input(self) -> Vec<Value>;
+        fn into_input(self) -> ValueStack;
         fn subtype(ty: &[ValueType]) -> bool;
     }
 
     pub trait SealedOutput: ArgumentFmt {
         fn update_compiler(compiler: &mut ActiveCompilation);
-        fn push(self, stack: &mut Vec<Value>);
-        fn get_output(stack: &mut Vec<Value>) -> Option<Self>;
+        fn push(self, stack: &mut ValueStack);
+        fn get_output(stack: &mut ValueStack) -> Option<Self>;
         fn subtype(ty: &[ValueType]) -> bool;
     }
 }
@@ -81,12 +80,12 @@ impl<T: Parameter> SealedInput for T {
         compiler.pop_slice(T::TYPE).is_ok()
     }
 
-    fn get_checked(stack: &mut Vec<Value>) -> Option<Self> {
+    fn get_checked(stack: &mut ValueStack) -> Option<Self> {
         T::from_stack(stack)
     }
 
-    fn into_input(self) -> Vec<Value> {
-        T::into_values(self).into_iter().collect()
+    fn into_input(self) -> ValueStack {
+        ValueStack(T::into_words(self).into_iter().collect::<Vec<_>>())
     }
 
     fn subtype(ty: &[ValueType]) -> bool {
@@ -99,11 +98,11 @@ impl<T: Parameter> SealedOutput for T {
         compiler.push_slice(T::TYPE)
     }
 
-    fn push(self, stack: &mut Vec<Value>) {
-        stack.extend(T::into_values(self))
+    fn push(self, stack: &mut ValueStack) {
+        stack.0.extend(T::into_words(self))
     }
 
-    fn get_output(stack: &mut Vec<Value>) -> Option<Self> {
+    fn get_output(stack: &mut ValueStack) -> Option<Self> {
         T::from_stack(stack)
     }
 
@@ -121,11 +120,11 @@ impl<T: SealedOutput> FunctionOutput for T {}
 impl Parameter for () {
     const TYPE: &'static [ValueType] = &[];
 
-    fn from_stack(_: &mut Vec<Value>) -> Option<Self> {
+    fn from_stack(_: &mut ValueStack) -> Option<Self> {
         Some(())
     }
 
-    fn into_values(self) -> impl IntoIterator<Item = Value> {
+    fn into_words(self) -> impl IntoIterator<Item=Word> {
         iter::empty()
     }
 }
@@ -141,11 +140,11 @@ impl SealedOutput for Infallible {
         compiler.set_unreachable()
     }
 
-    fn push(self, _: &mut Vec<Value>) {
+    fn push(self, _: &mut ValueStack) {
         match self {}
     }
 
-    fn get_output(_: &mut Vec<Value>) -> Option<Self> {
+    fn get_output(_: &mut ValueStack) -> Option<Self> {
         unreachable!()
     }
 
@@ -157,12 +156,12 @@ impl SealedOutput for Infallible {
 impl<T: ValueInner> Parameter for T {
     const TYPE: &'static [ValueType] = &[T::TYPE];
 
-    fn from_stack(stack: &mut Vec<Value>) -> Option<Self> {
-        stack.pop().and_then(T::from)
+    fn from_stack(stack: &mut ValueStack) -> Option<Self> {
+        stack.pop()
     }
 
-    fn into_values(self) -> impl IntoIterator<Item = Value> {
-        iter::once(self.into())
+    fn into_words(self) -> impl IntoIterator<Item=Word> {
+        self.to_words()
     }
 }
 
@@ -180,19 +179,29 @@ pub fn fmt_fn_signature<T: FunctionInput, U: FunctionOutput>() -> impl Display {
     FmtArgs::<T, U>(PhantomData)
 }
 
-macro_rules! impl_param_for_tuple {
-    ($(($($T:literal),+ $(,)?))+) => {paste::paste! {
-        $(
-        impl<$([<T $T>]: ValueInner),*> Parameter for ($([<T $T>]),+,) {
-            const TYPE: &'static [ValueType] = &[$([<T $T>]::TYPE),+];
+macro_rules! pop_reversed {
+    ($stack:ident [] [$($T:ident)+]) => {
+        $(let $T = $stack.pop()?;)+
+    };
+    ($stack:ident [$one:ident $($rest:ident)*] [$($acc:ident)*]) => {
+        pop_reversed!($stack [$($rest)*] [$one $($acc)*])
+    };
+}
 
-            fn from_stack(stack: &mut Vec<Value>) -> Option<Self> {
-                let [$( [<t $T>] ),+] = stack.pop_n()?;
-                Some(($([<T $T>]::from([<t $T>])?),+,))
+
+macro_rules! impl_param_for_tuple {
+    ($(($T0:literal $(, $T:literal)* $(,)?))+) => {paste::paste! {
+        $(
+        impl< [<T $T0>]: ValueInner $(, [<T $T>]: ValueInner)*> Parameter for ([<T $T0>] $(,[<T $T>])+ ,) {
+            const TYPE: &'static [ValueType] = &[[<T $T0>]::TYPE $(, [<T $T>]::TYPE)*];
+
+            fn from_stack(stack: &mut ValueStack) -> Option<Self> {
+                pop_reversed!(stack [t0 $( [<t $T>] )*] []);
+                Some((t0 $(, [<t $T>])+))
             }
 
-            fn into_values(self) -> impl IntoIterator<Item=Value> {
-                [$(self.$T.into()),+]
+            fn into_words(self) -> impl IntoIterator<Item=Word> {
+                <[<T $T0>]>::to_words(self.$T0) $(.into_iter().chain(<[<T $T>]>::to_words(self.$T)))*
             }
         }
         )+

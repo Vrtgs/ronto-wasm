@@ -50,6 +50,7 @@ const _: () = assert!(
 impl Index {
     pub const ZERO: Self = Self(0);
     pub const MAX: Self = Self(u32::MAX);
+    pub const NULL: Self = Self::MAX;
 
     pub const fn try_from_usize(index: usize) -> Option<Index> {
         if index >= u32::MAX as usize {

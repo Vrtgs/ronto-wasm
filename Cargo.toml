@@ -3,6 +3,10 @@ name = "ronto-wasm"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = 3
+debug = "full"
+
 [profile.test]
 opt-level = 3
 debug = "full"
@@ -16,6 +20,7 @@ bytemuck = { version = "1.22.0", features = ["extern_crate_alloc", "min_const_ge
 crossbeam = "0.8.4"
 getrandom = "0.3.1"
 wat = "1.227.1"
+image = "0.25.5"
 
 [dev-dependencies]
 proptest = "1.6.0"

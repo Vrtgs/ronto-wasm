@@ -1,12 +1,12 @@
-use super::instruction_code::{
-    AccessType, Call, CastingMemoryAccess, InstructionCode, MemoryAccess, MemoryInit, Primitive,
-    RefNull, VariableAccess, access_type,
+use super::typed_instruction_code::{
+    access_type, AccessType, Call, CastingMemoryAccess, MemoryAccess, MemoryInit, Primitive,
+    RefNull, TypedInstructionCode,
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::invalid_data;
 use crate::parser::{
     DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument,
-    MemoryIndex, NumericType, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
+    MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
 };
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryError;
@@ -137,7 +137,7 @@ macro_rules! instruction {
             ),+ $(,)?
         }
 
-        Parametric {
+        Untyped {
             $(
                 ($parametric_name: literal, $parametric_ident: ident) => $parametric_opcode: literal $(($($parametric_data: ident),*))?
             ),+ $(,)?
@@ -152,12 +152,17 @@ macro_rules! instruction {
         #[derive(Debug, PartialEq, Clone)]
         pub(super) enum Instruction {
             ControlFlow(ControlFlowInstruction),
-            Parametric(ParametricInstruction),
             Simple(SimpleInstruction),
         }
 
         #[derive(Debug, PartialEq, Clone)]
-        pub(super) enum ParametricInstruction {
+        pub enum SimpleInstruction {
+            Untyped(UntypedInstruction),
+            Typed(TypedInstruction),
+        }
+
+        #[derive(Debug, PartialEq, Clone)]
+        pub(super) enum UntypedInstruction {
             $($parametric_ident $(($($parametric_data),*))? ),+
         }
 
@@ -168,7 +173,7 @@ macro_rules! instruction {
 
         #[derive(Debug, PartialEq, Clone)]
         #[non_exhaustive]
-        pub(super) enum SimpleInstruction {
+        pub(super) enum TypedInstruction {
             $($simple_ident $(($($simple_data),*))? ),+
         }
 
@@ -188,15 +193,19 @@ macro_rules! instruction {
                         )+
                         $(
                             ($parametric_opcode,) => {
-                                 return Ok(Instruction::Parametric(
-                                     ParametricInstruction::$parametric_ident $(($(<$parametric_data>::decode(file)?),*))?
+                                 return Ok(Instruction::Simple(
+                                     SimpleInstruction::Untyped(
+                                         UntypedInstruction::$parametric_ident $(($(<$parametric_data>::decode(file)?),*))?
+                                     )
                                  ))
                             },
                         )+
                         $(
                             ($simple_opcode, $($instr_variant)?) => {
                                  return Ok(Instruction::Simple(
-                                     SimpleInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?
+                                     SimpleInstruction::Typed(
+                                         TypedInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?
+                                     )
                                  ))
                             },
                         )+
@@ -210,7 +219,7 @@ macro_rules! instruction {
                 normalize_match_double!(match ((first_byte, second_opcode)) {
                     {$(
                         ($simple_opcode, $($instr_variant)?) => {
-                             Ok(Instruction::Simple(SimpleInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?))
+                             Ok(Instruction::Simple(SimpleInstruction::Typed(TypedInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?)))
                         },
                     )+}
                     {_ => Err(invalid_data(format!("invalid instruction (0x{first_byte:02x}, {second_opcode})")))}
@@ -218,7 +227,7 @@ macro_rules! instruction {
             }
         }
 
-        impl SimpleInstruction {
+        impl TypedInstruction {
             pub(super) fn const_available(&self) -> bool {
                 macro_rules! is_const {
                     (const) => {true};
@@ -234,9 +243,9 @@ macro_rules! instruction {
                 #[allow(non_snake_case)]
                 let ret = match self {
                     $(Self::$simple_ident$(($($simple_data),*))? => {
-                        let primitive = &const { $code };
+                        let primitive = const { $code };
                         #[allow(unused_parens)]
-                        InstructionCode::<($(($(&$simple_data),*))?)>::validate(primitive, ($(($($simple_data),*))?), compiler)
+                        TypedInstructionCode::<($(($(&$simple_data),*))?)>::validate(primitive, ($(($($simple_data),*))?), compiler)
                     },)+
                 };
                 ret
@@ -246,9 +255,8 @@ macro_rules! instruction {
                 #[allow(non_snake_case)]
                 let ret = match self {
                     $(Self::$simple_ident$(($($simple_data),*))? => {
-                        let primitive = &const { $code };
                         #[allow(unused_parens)]
-                        InstructionCode::<($(($(&$simple_data),*))?)>::call(primitive, ($(($($simple_data),*))?), context)
+                        TypedInstructionCode::<($(($(&$simple_data),*))?)>::call(const { $code }, ($(($($simple_data),*))?), context)
                     },)+
                 };
 
@@ -613,13 +621,13 @@ impl BlockType {
             BlockType::Type(ty) => Ok((&[], {
                 const_ref!(
                     ty,
-                    (ValueType::NumericType(NumericType::I32)),
-                    (ValueType::NumericType(NumericType::I64)),
-                    (ValueType::NumericType(NumericType::F32)),
-                    (ValueType::NumericType(NumericType::F64)),
-                    (ValueType::NumericType(NumericType::V128)),
-                    (ValueType::ReferenceType(ReferenceType::Function)),
-                    (ValueType::ReferenceType(ReferenceType::Extern)),
+                    (ValueType::I32),
+                    (ValueType::I64),
+                    (ValueType::F32),
+                    (ValueType::F64),
+                    (ValueType::V128),
+                    (ValueType::Function),
+                    (ValueType::Extern),
                 )
             })),
             BlockType::TypeIndex(ty) => {
@@ -671,10 +679,20 @@ instruction! {
         ("return",        Return) => 0x0f
     }
 
-    Parametric {
+    Untyped {
+        // Parametric
         ("drop",         Drop) => 0x1a,
         ("select",     Select) => 0x1b,
-        ("select_t*", SelectT) => 0x1c (OptionalValueType)
+        ("select_t*", SelectT) => 0x1c (OptionalValueType),
+
+        // Variable Instructions
+        ("local.get",   LocalGet) => 0x20 (Local),
+        ("local.set",   LocalSet) => 0x21 (Local),
+        ("local.tee",   LocalTee) => 0x22 (Local),
+
+        // Global Instructions
+        ("global.get", GlobalGet) => 0x23 (Global),
+        ("global.set", GlobalSet) => 0x24 (Global),
     }
 
     Simple {
@@ -689,14 +707,6 @@ instruction! {
         const ("ref.null",      RefNull) => 0xd0 (ReferenceType) code: RefNull, // FIXME heaptype
         const ("ref.is_null", RefIsNull) => 0xd1 code: compare!(func: Function; func == Function::NULL),
         const ("ref.func",      RefFunc) => 0xd2 (Function) code: immediate!(Function),
-
-
-        // Variable Instructions
-        ("local.get",   LocalGet) => 0x20 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Get) }>(PhantomData),
-        ("local.set",   LocalSet) => 0x21 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Set) }>(PhantomData),
-        ("local.tee",   LocalTee) => 0x22 ( Local) code: VariableAccess::<Local,  { access_type!(AccessType::Tee) }>(PhantomData),
-        ("global.get", GlobalGet) => 0x23 (Global) code: VariableAccess::<Global, { access_type!(AccessType::Get) }>(PhantomData),
-        ("global.set", GlobalSet) => 0x24 (Global) code: VariableAccess::<Global, { access_type!(AccessType::Set) }>(PhantomData),
 
         // Memory Instructions
 

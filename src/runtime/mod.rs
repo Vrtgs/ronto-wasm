@@ -1,28 +1,30 @@
-use crate::expression::{Expression, FunctionBody, WasmCompilationContext};
+use crate::expression::FunctionBody;
 use crate::parser::{
-    Data, DataIndex, Element, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex,
-    GlobalType, ImportDescription, InitMode, LocalIndex, MemoryArgument, MemoryIndex, NumericType,
-    ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType, WasmBinary, WasmSections,
-    WasmVersion,
+    DataIndex, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, LocalIndex,
+    MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, ValueType,
 };
 use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-use crate::vector::{Index, WasmVec, vector_from_vec};
-use crate::{Stack as _, invalid_data};
-use bytemuck::Pod;
+use crate::vector::{Index, WasmVec};
+use crate::{invalid_data, Stack};
+use anyhow::Context;
+use bytemuck::{Pod, Zeroable};
 use crossbeam::atomic::AtomicCell;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
-use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod memory_buffer;
 pub mod parameter;
-mod wasi_snapshot_preview1;
+pub mod wasi_snapshot_preview1;
+
+pub mod linker;
+pub mod store;
+
+use crate::runtime::linker::{Import, NativeFunction};
+pub use {linker::Linker, store::Store};
 
 #[derive(Debug, Copy, Clone)]
 pub enum ReferenceValue {
@@ -50,6 +52,13 @@ pub enum Value {
 }
 
 #[derive(Debug, Copy, Clone)]
+pub enum ValueBitsType {
+    I32,
+    I64,
+    V128,
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum ValueBits {
     I32(u32),
     I64(u64),
@@ -59,27 +68,23 @@ pub enum ValueBits {
 impl Value {
     pub fn new(ty: ValueType) -> Value {
         match ty {
-            ValueType::NumericType(NumericType::I32) => Value::I32(0),
-            ValueType::NumericType(NumericType::I64) => Value::I64(0),
-            ValueType::NumericType(NumericType::F32) => Value::F32(0.0),
-            ValueType::NumericType(NumericType::F64) => Value::F64(0.0),
-            ValueType::NumericType(NumericType::V128) => Value::V128(0),
-            ValueType::ReferenceType(ReferenceType::Function) => {
-                Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
-            }
-            ValueType::ReferenceType(ReferenceType::Extern) => {
-                Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
-            }
+            ValueType::I32 => Value::I32(0),
+            ValueType::I64 => Value::I64(0),
+            ValueType::F32 => Value::F32(0.0),
+            ValueType::F64 => Value::F64(0.0),
+            ValueType::V128 => Value::V128(0),
+            ValueType::Function => Value::Ref(ReferenceValue::Function(FunctionIndex::NULL)),
+            ValueType::Extern => Value::Ref(ReferenceValue::Extern(ExternIndex::NULL)),
         }
     }
 
     pub fn r#type(&self) -> ValueType {
         match self {
-            Value::I32(_) => ValueType::NumericType(NumericType::I32),
-            Value::I64(_) => ValueType::NumericType(NumericType::I64),
-            Value::F32(_) => ValueType::NumericType(NumericType::F32),
-            Value::F64(_) => ValueType::NumericType(NumericType::F64),
-            Value::V128(_) => ValueType::NumericType(NumericType::V128),
+            Value::I32(_) => ValueType::I32,
+            Value::I64(_) => ValueType::I64,
+            Value::F32(_) => ValueType::F32,
+            Value::F64(_) => ValueType::F64,
+            Value::V128(_) => ValueType::V128,
             Value::Ref(reference) => ValueType::ReferenceType(reference.r#type()),
         }
     }
@@ -99,31 +104,67 @@ impl Value {
     }
 }
 
-pub(crate) trait ValueInner: Pod + Send + Sync + Debug {
+/// # Safety:
+/// must have no padding when aligned to 4 bytes
+pub(crate) unsafe trait WordAligned: Pod {}
+
+#[derive(Copy, Clone)]
+#[repr(C, packed(4))]
+pub(crate) struct WordAlign<T: WordAligned>(T);
+
+unsafe impl<T: WordAligned> Zeroable for WordAlign<T> {}
+unsafe impl<T: WordAligned> Pod for WordAlign<T> {}
+
+impl<T: WordAligned> WordAlign<T> {
+    pub(crate) fn read(&self) -> T {
+        self.0
+    }
+    pub(crate) fn write(&mut self, value: T) {
+        self.0 = value
+    }
+}
+
+pub(crate) trait ValueInner: WordStore {
     const TYPE: ValueType;
 
     fn into(self) -> Value;
     fn from(data: Value) -> Option<Self>;
-    fn from_ref(data: &Value) -> Option<&Self>;
 }
+
+pub(crate) trait WordStore: WordAligned + Send + Sync + Debug {
+    fn from_words(data: &mut Vec<Word>) -> Option<Self>;
+    fn to_words(self) -> impl IntoIterator<Item=Word>;
+    fn push_words(self, data: &mut Vec<Word>) {
+        data.extend(self.to_words())
+    }
+    fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>>;
+    fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>>;
+}
+
+macro_rules! impl_word_aligned {
+    ($($ty:ty),*) => {$(
+    const _: () = {
+        const fn assert_pod<T: Pod>() {}
+        assert_pod::<$ty>();
+        assert!(size_of::<$ty>() % size_of::<Word>() == 0 && align_of::<$ty>() >= align_of::<Word>())
+    };
+    
+    unsafe impl WordAligned for $ty {}
+    )*};
+}
+
+impl_word_aligned!(Index, FunctionIndex, ExternIndex, i32, u32, f32, i64, u64, f64, i128, u128);
 
 macro_rules! impl_numeric_value {
     ($($variant: ident => $ty:ty $(; $sty: ty)?),+ $(,)?) => {$(
         impl ValueInner for $ty {
-            const TYPE: ValueType = ValueType::NumericType(NumericType::$variant);
+            const TYPE: ValueType = ValueType::$variant;
 
             fn into(self) -> Value {
                 Value::$variant(self)
             }
 
             fn from(data: Value) -> Option<Self> {
-                match data {
-                    Value::$variant(inner) => Some(inner),
-                    _ => None
-                }
-            }
-
-            fn from_ref(data: &Value) -> Option<&Self> {
                 match data {
                     Value::$variant(inner) => Some(inner),
                     _ => None
@@ -141,9 +182,23 @@ macro_rules! impl_numeric_value {
             fn from(data: Value) -> Option<Self> {
                 <$ty as ValueInner>::from(data).map(|inner| inner as $sty)
             }
+        }
 
-            fn from_ref(data: &Value) -> Option<&Self> {
-                <$ty as ValueInner>::from_ref(data).map(bytemuck::must_cast_ref)
+        impl WordStore for $sty {
+            fn from_words(data: &mut Vec<Word>) -> Option<Self> {
+                <$ty>::from_words(data).map(|inner| inner as $sty)
+            }
+
+            fn to_words(self) -> impl IntoIterator<Item=Word> {
+                <$ty>::to_words(self as $ty)
+            }
+
+            fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>> {
+                <$ty>::ref_from_words(data).map(bytemuck::must_cast_ref)
+            }
+
+            fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>> {
+                <$ty>::get_mut(index, locals).map(bytemuck::must_cast_mut)
             }
         }
         )?
@@ -153,7 +208,7 @@ macro_rules! impl_numeric_value {
 macro_rules! impl_reference_value {
     ($($variant:ident => $ty:ty),+ $(,)?) => {$(
         impl ValueInner for $ty {
-            const TYPE: ValueType = ValueType::ReferenceType(ReferenceType::$variant);
+            const TYPE: ValueType = ValueType::$variant;
 
             fn into(self) -> Value {
                 Value::Ref(ReferenceValue::$variant(self))
@@ -165,16 +220,86 @@ macro_rules! impl_reference_value {
                     _ => None
                 }
             }
+        }
 
-            fn from_ref(data: &Value) -> Option<&Self> {
-                match data {
-                    Value::Ref(ReferenceValue::$variant(inner)) => Some(inner),
-                    _ => None
-                }
+        impl WordStore for $ty {
+            fn from_words(data: &mut Vec<Word>) -> Option<Self> {
+                <Index>::from_words(data).map(Self)
+            }
+
+            fn to_words(self) -> impl IntoIterator<Item=Word> {
+                <Index>::to_words(self.0)
+            }
+
+            fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>> {
+                <Index>::ref_from_words(data).map(bytemuck::must_cast_ref)
+            }
+
+            fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>> {
+                <Index>::get_mut(index, locals).map(bytemuck::must_cast_mut)
             }
         }
     )+};
 }
+
+macro_rules! store_32 {
+    ($($ty:ty),*) => {$(
+    impl WordStore for $ty {
+        fn from_words(data: &mut Vec<Word>) -> Option<Self> {
+            data.pop().map(bytemuck::must_cast)
+        }
+
+        fn to_words(self) -> impl IntoIterator<Item=Word> {
+            [bytemuck::must_cast(self)]
+        }
+
+        fn push_words(self, data: &mut Vec<Word>) {
+            data.push(bytemuck::must_cast(self))
+        }
+
+        fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>> {
+            data.last().map(bytemuck::must_cast_ref)
+        }
+
+        fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>> {
+            locals.get_mut(index.0).map(bytemuck::must_cast_mut)
+        }
+    }
+    )*};
+}
+
+macro_rules! store_generic {
+    ($($ty:ty),*) => {$(
+    impl WordStore for $ty {
+        fn from_words(data: &mut Vec<Word>) -> Option<Self> {
+            data.pop_n::<{size_of::<$ty>()/size_of::<Word>()}>().map(bytemuck::must_cast)
+        }
+
+        fn to_words(self) -> impl IntoIterator<Item=Word> {
+            bytemuck::must_cast::<_, [Word; {size_of::<$ty>()/size_of::<Word>()}]>(self)
+        }
+
+        fn push_words(self, data: &mut Vec<Word>) {
+            let arr = bytemuck::must_cast::<_, [Word; {size_of::<$ty>()/size_of::<Word>()}]>(self);
+            data.extend_from_slice(&arr);
+        }
+
+        fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>> {
+            data.last_chunk::<{size_of::<$ty>()/size_of::<Word>()}>().map(bytemuck::must_cast_ref)
+        }
+
+        fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>> {
+                (**locals).get_mut(index.0.as_usize()..index.0.as_usize().checked_add(const {size_of::<$ty>()/size_of::<Word>()})?)
+                    .map(bytemuck::cast_slice_mut)
+                    .map(bytemuck::from_bytes_mut)
+        }
+    }
+    )*};
+}
+
+store_32!(u32, f32);
+
+store_generic!(u128, u64, f64);
 
 impl_numeric_value! {
     I32  =>  u32; i32,
@@ -194,9 +319,23 @@ impl ValueInner for Index {
     fn from(data: Value) -> Option<Self> {
         <u32 as ValueInner>::from(data).map(Index)
     }
+}
 
-    fn from_ref(data: &Value) -> Option<&Self> {
-        <u32 as ValueInner>::from_ref(data).map(bytemuck::must_cast_ref)
+impl WordStore for Index {
+    fn from_words(data: &mut Vec<Word>) -> Option<Self> {
+        u32::from_words(data).map(Self)
+    }
+
+    fn to_words(self) -> impl IntoIterator<Item=Word> {
+        u32::to_words(self.0)
+    }
+
+    fn ref_from_words(data: &[Word]) -> Option<&WordAlign<Self>> {
+        u32::ref_from_words(data).map(bytemuck::must_cast_ref)
+    }
+
+    fn get_mut(index: LocalIndex, locals: &mut WasmVec<Word>) -> Option<&mut WordAlign<Self>> {
+        u32::get_mut(index, locals).map(bytemuck::must_cast_mut)
     }
 }
 
@@ -224,24 +363,18 @@ impl GlobalValueInner {
     pub fn new(value: GlobalType) -> Self {
         match (value.mutable, value.value_type) {
             (false, ty) => Self::Immutable(Value::new(ty)),
-            (true, ValueType::NumericType(NumericType::I32)) => {
-                Self::Mutable64(AtomicU64::new(0), Mut64Type::I32)
-            }
-            (true, ValueType::NumericType(NumericType::I64)) => {
-                Self::Mutable64(AtomicU64::new(0), Mut64Type::I64)
-            }
-            (true, ValueType::NumericType(NumericType::F32)) => {
+            (true, ValueType::I32) => Self::Mutable64(AtomicU64::new(0), Mut64Type::I32),
+            (true, ValueType::I64) => Self::Mutable64(AtomicU64::new(0), Mut64Type::I64),
+            (true, ValueType::F32) => {
                 Self::Mutable64(AtomicU64::new(f32::to_bits(0.0) as u64), Mut64Type::F32)
             }
-            (true, ValueType::NumericType(NumericType::F64)) => {
+            (true, ValueType::F64) => {
                 Self::Mutable64(AtomicU64::new(f64::to_bits(0.0)), Mut64Type::F64)
             }
             (true, ValueType::ReferenceType(ref_ty)) => {
-                Self::Mutable64(AtomicU64::new(u32::MAX as u64), Mut64Type::Ref(ref_ty))
+                Self::Mutable64(AtomicU64::new(Index::NULL.0 as u64), Mut64Type::Ref(ref_ty))
             }
-            (true, ValueType::NumericType(NumericType::V128)) => {
-                Self::Mutable128(AtomicCell::new(0))
-            }
+            (true, ValueType::V128) => Self::Mutable128(AtomicCell::new(0)),
         }
     }
 
@@ -334,10 +467,10 @@ impl GlobalValueInner {
             GlobalValueInner::Mutable64(_, ty) => {
                 let value_type = match ty {
                     Mut64Type::Ref(ref_ty) => ValueType::ReferenceType(ref_ty),
-                    Mut64Type::I32 => NumericType::I32.into(),
-                    Mut64Type::F32 => NumericType::F32.into(),
-                    Mut64Type::I64 => NumericType::I64.into(),
-                    Mut64Type::F64 => NumericType::F64.into(),
+                    Mut64Type::I32 => ValueType::I32,
+                    Mut64Type::F32 => ValueType::F32,
+                    Mut64Type::I64 => ValueType::I64,
+                    Mut64Type::F64 => ValueType::F64,
                 };
                 GlobalType {
                     mutable: true,
@@ -346,7 +479,7 @@ impl GlobalValueInner {
             }
             GlobalValueInner::Mutable128(_) => GlobalType {
                 mutable: true,
-                value_type: NumericType::V128.into(),
+                value_type: ValueType::V128,
             },
         }
     }
@@ -375,23 +508,15 @@ impl Debug for GlobalValueRef<'_> {
     }
 }
 
-type NativeFunction = dyn Fn(&mut WasmContext) -> Result<(), Trap> + Send + Sync;
-
-#[expect(dead_code)]
-struct ImportedFunction {
-    module: Box<str>,
-    name: Box<str>,
-    body: Box<NativeFunction>,
-}
-
 struct WasmFunction {
-    locals: WasmVec<ValueType>,
+    parameters_len: Index,
+    locals: WasmVec<Word>,
     body: FunctionBody,
 }
 
 enum Body {
     WasmDefined(WasmFunction),
-    Import(ImportedFunction),
+    Import(Arc<NativeFunction>),
 }
 
 pub(crate) struct FunctionInner {
@@ -432,98 +557,23 @@ impl Default for VirtualMachineOptions {
     }
 }
 
-pub struct WasmVirtualMachine {
-    types: WasmVec<TypeInfo>,
-    functions: WasmVec<FunctionInner>,
-    tables: WasmVec<Table>,
-    memory: WasmVec<MemoryBuffer>,
-    globals: WasmVec<GlobalValueInner>,
-    data: WasmVec<Data>,
-    element: WasmVec<Element>,
-    start: Option<FunctionIndex>,
-    exports: HashMap<Box<str>, ExportDescription>,
-    options: VirtualMachineOptions,
+pub struct VirtualMachine {
+    pub(crate) store: Store,
+    pub(crate) options: VirtualMachineOptions,
 }
 
-type SubTypeCheck = fn(&[ValueType]) -> bool;
+type Constructor = Box<dyn FnOnce(&mut Store) -> anyhow::Result<()>>;
 
-struct NativeFunctionSignature {
-    input: SubTypeCheck,
-    output: SubTypeCheck,
-}
-
-enum ImportInner {
-    Function(Box<NativeFunction>, NativeFunctionSignature),
-    Global(Value),
-    Memory(MemoryBuffer),
-}
-
-pub struct Import(ImportInner);
-
-impl Import {
-    pub fn function<In: FunctionInput, Out: FunctionOutput>(
-        fun: impl Fn(In) -> Out + Send + Sync + 'static,
-    ) -> Self {
-        Import::function_full(move |input, _| fun(input))
-    }
-
-    pub fn function_with_mem<In: FunctionInput, Out: FunctionOutput>(
-        fun: impl Fn(In, &MemoryBuffer) -> Out + Send + Sync + 'static,
-    ) -> Self {
-        Import::function_full(move |input, context| {
-            fun(
-                input,
-                context
-                    .mem(MemoryIndex::ZERO)
-                    .expect("wasm module didn't contain memory"),
-            )
-        })
-    }
-
-    pub(crate) fn function_full<In: FunctionInput, Out: FunctionOutput>(
-        fun: impl Fn(In, &mut WasmContext) -> Out + Send + Sync + 'static,
-    ) -> Self {
-        let function = Box::new(move |context: &mut WasmContext| {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let input = In::get(context.stack);
-                let output = fun(input, context);
-                Out::push(output, context.stack)
-            }))
-            .map_err(|_| Trap::new())
-        });
-        let signature = NativeFunctionSignature {
-            input: In::subtype,
-            output: Out::subtype,
-        };
-
-        Import(ImportInner::Function(function, signature))
-    }
-
-    pub fn global(value: Value) -> Self {
-        Import(ImportInner::Global(value))
-    }
-
-    pub fn memory(mem: MemoryBuffer) -> Self {
-        Import(ImportInner::Memory(mem))
-    }
-}
-
-struct Resolve {
-    import: ImportInner,
-    prelude: bool,
-}
-
-type Constructor = Box<dyn FnOnce(&mut WasmVirtualMachine) -> anyhow::Result<()>>;
-
-fn validate_vm(vm: &WasmVirtualMachine) -> anyhow::Result<()> {
+fn validate_vm(vm: &VirtualMachine) -> anyhow::Result<()> {
     if vm
+        .store
         .start
         .is_some_and(|func| vm.get_typed_function::<(), ()>(func).is_err())
     {
         return Err(invalid_data("invalid start function index"));
     }
 
-    for (export_name, &desc) in vm.exports.iter() {
+    for (export_name, &desc) in vm.store.exports.iter() {
         let is_valid = match desc {
             ExportDescription::Function(function) => vm.get_function(function).is_some(),
             ExportDescription::Memory(memory) => vm.get_memory(memory).is_some(),
@@ -538,407 +588,35 @@ fn validate_vm(vm: &WasmVirtualMachine) -> anyhow::Result<()> {
     Ok(())
 }
 
-impl WasmVirtualMachine {
-    #[allow(clippy::too_many_arguments)]
-    fn create(
-        types: WasmVec<TypeInfo>,
-        functions: impl IntoIterator<Item = FunctionInner>,
-        tables: impl IntoIterator<Item = Table>,
-        memory: impl IntoIterator<Item = MemoryBuffer>,
-        exports: HashMap<Box<str>, ExportDescription>,
-        global_stubs: impl IntoIterator<Item = GlobalValueInner>,
-        data: impl IntoIterator<Item = Data>,
-        element: impl IntoIterator<Item = Element>,
-        start: Option<FunctionIndex>,
-        constructors: impl IntoIterator<Item = Constructor>,
-    ) -> anyhow::Result<Self> {
-        fn collect_wasm_vec<T>(it: impl IntoIterator<Item = T>) -> anyhow::Result<WasmVec<T>> {
-            WasmVec::try_from(it.into_iter().collect::<Box<[_]>>())
-                .map_err(|_| invalid_data("too many functions in store"))
-        }
-
-        let functions = collect_wasm_vec(functions)?;
-
-        if let Some(FunctionIndex(start)) = start {
-            if functions.get(start).is_none() {
-                return Err(invalid_data(format!("invalid start index {}", start.0)));
-            }
-        }
-
-        let mut this = WasmVirtualMachine {
-            types,
-            functions,
-            tables: collect_wasm_vec(tables)?,
-            memory: collect_wasm_vec(memory)?,
-            exports,
-            globals: collect_wasm_vec(global_stubs)?,
-            data: collect_wasm_vec(data)?,
-            element: collect_wasm_vec(element)?,
-            start,
-            options: VirtualMachineOptions::default(),
-        };
-
-        for constructor in constructors {
-            constructor(&mut this)?
-        }
-
+impl VirtualMachine {
+    fn with_options(store: Store, options: VirtualMachineOptions) -> anyhow::Result<Self> {
+        let this = VirtualMachine { store, options };
         validate_vm(&this)?;
-
         Ok(this)
     }
 
-    fn with_resolver(
-        sections: WasmSections,
-        mut imports: HashMap<(Cow<str>, Cow<str>), Resolve>,
-    ) -> anyhow::Result<Self> {
-        let types = sections.r#type.map(|sec| sec.functions).unwrap_or_default();
-
-        let wasm_function_types = sections
-            .function
-            .map(|fun| fun.signatures)
-            .unwrap_or_default();
-        let wasm_defined_functions = sections.code.map(|fun| fun.definitions).unwrap_or_default();
-        if wasm_function_types.len() != wasm_defined_functions.len() {
-            return Err(invalid_data("mismatched function signatures and functions"));
-        }
-
-        let import_stubs = sections.import.map(|fun| fun.imports).unwrap_or_default();
-
-        let (imported_functions, imported_globals, _) = import_stubs
-            .into_iter()
-            .map(|imp| {
-                let (module, name) = (imp.module, imp.name);
-                let key = (Cow::Owned(module.into()), Cow::Owned(name.into()));
-                let import = imports.remove(&key).ok_or_else(|| {
-                    invalid_data(format!("unresolved import [{}]::[{}]", key.0, key.1))
-                })?;
-
-                let (module, name) = (key.0.into_owned().into(), key.1.into_owned().into());
-                Ok(match (imp.description, import.import) {
-                    (ImportDescription::Function(r#type), ImportInner::Function(body, signature)) => {
-                        let Some(import_type) = types.get(r#type.0) else {
-                            return Err(invalid_data("invalid import type index"));
-                        };
-
-                        if !(signature.input)(&import_type.parameters) || !(signature.output)(&import_type.result) {
-                            return Err(invalid_data(format!(
-                                "invalid function [{module}]::[{name}] signature, expected {import_type}"
-                            )));
-                        }
-
-                        let func = FunctionInner {
-                            r#type,
-                            body: Body::Import(ImportedFunction { module, name, body }),
-                        };
-                        (Some(func), None, None)
-                    }
-                    (ImportDescription::Global(_), ImportInner::Global(value)) => {
-                        (None, Some(GlobalValueInner::Immutable(value)), None)
-                    }
-                    (ImportDescription::Memory(imposed_limit), ImportInner::Memory(buffer)) => {
-                        if imposed_limit.min > buffer.min() && imposed_limit.max > buffer.max() {
-                            return Err(invalid_data("invalid memory buffer signature"));
-                        }
-                        (None, None, Some(buffer))
-                    }
-                    _ => return Err(invalid_data("mismatched import type")),
-                })
-            })
-            .collect::<anyhow::Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
-
-        let wasm_defined_globals = sections.global.map(|glob| glob.globals).unwrap_or_default();
-
-        let globals_signatures = vector_from_vec(
-            imported_globals
-                .iter()
-                .flatten()
-                .map(|glob| glob.r#type())
-                .chain(wasm_defined_globals.iter().map(|glob| glob.r#type))
-                .collect(),
-        )?;
-
-        let function_signatures = vector_from_vec(
-            imported_functions
-                .iter()
-                .flatten()
-                .map(|func| func.r#type)
-                .chain(wasm_function_types.iter().copied())
-                .collect(),
-        )?;
-
-        let tables = sections
-            .table
-            .as_ref()
-            .map(|sec| &sec.tables)
-            .unwrap_or(const { &WasmVec::new() });
-
-        let mut compiler =
-            WasmCompilationContext::new(&globals_signatures, &function_signatures, &types, tables);
-
-        let functions = imported_functions
-            .into_iter()
-            .flatten()
-            .map(anyhow::Ok)
-            .chain(
-                wasm_defined_functions
-                    .into_iter()
-                    .zip(wasm_function_types)
-                    .map(|(def, r#type)| {
-                        Ok(FunctionInner {
-                            r#type,
-                            body: Body::WasmDefined(WasmFunction {
-                                locals: def.locals.clone(),
-                                body: FunctionBody::new(def, r#type, &mut compiler)?,
-                            }),
-                        })
-                    }),
-            );
-
-        let functions = vector_from_vec(functions.collect::<anyhow::Result<_>>()?)?;
-
-        let (global_constructors, global_stubs) = imported_globals
-            .into_iter()
-            .flatten()
-            .map(|val| (None, val))
-            .chain(
-                wasm_defined_globals
-                    .into_iter()
-                    .map(|glob| (Some(glob.expression), GlobalValueInner::new(glob.r#type))),
-            )
-            .unzip::<_, _, Vec<_>, Vec<_>>();
-
-        let global_constructors = global_constructors
-            .into_iter()
-            .enumerate()
-            .filter_map(|(i, expr)| expr.map(|expr| (i, expr)));
-
-        let global_setter = |this: &mut WasmVirtualMachine| {
-            for (i, global_constructor) in global_constructors {
-                global_constructor
-                    .const_eval(this)
-                    .ok_or_else(|| invalid_data("global constructor not available in const"))
-                    .and_then(|new_value| {
-                        (*this.globals)[i].store_mut(new_value).map_err(|_| {
-                            invalid_data("Global initialization failed, invalid return")
-                        })
-                    })?
-            }
-
-            Ok(())
-        };
-
-        for ((module, name), resolve) in imports {
-            if !resolve.prelude {
-                eprintln!("warning unused import: [{module}]::[{name}]")
-            }
-        }
-
-        let _const_eval_offset = |this: &WasmVirtualMachine, offset: &Expression| {
-            offset
-                .const_eval(this)
-                .ok_or_else(|| invalid_data("active element offset not available in const"))
-                .and_then(|val| {
-                    <Index as ValueInner>::from(val)
-                        .ok_or_else(|| invalid_data("invalid offset type"))
-                })
-        };
-
-        macro_rules! init_active_segment {
-            ($this: expr, $name:ident, |$index:ident, $offset:ident| $expr: expr) => {{
-                for $name in $this.$name.iter() {
-                    let InitMode::Active {
-                        index: $index,
-                        offset: ref $offset,
-                    } = $name.mode
-                    else {
-                        continue;
-                    };
-
-                    let $offset = _const_eval_offset($this, $offset)?;
-
-                    $expr
-                }
-                Ok(())
-            }};
-        }
-
-        let memory_setter = move |this: &mut WasmVirtualMachine| {
-            init_active_segment!(this, data, |memory_index, offset| {
-                let buff = this
-                    .memory
-                    .get(memory_index)
-                    .ok_or_else(|| invalid_data("invalid memory index offset"))?;
-
-                buff.init(offset, &data.init).map_err(|_| {
-                    invalid_data("invalid memory operation performed by active segment")
-                })?;
-            })
-        };
-
-        let table_setter = move |this: &mut WasmVirtualMachine| {
-            init_active_segment!(this, element, |table_index, offset| {
-                let values = element
-                    .init
-                    .iter()
-                    .map(|expr| match expr.const_eval(this) {
-                        Some(Value::Ref(ReferenceValue::Function(func))) => Some(func),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| invalid_data("invalid element initialization"))?;
-
-                let table = this
-                    .tables
-                    .get_mut(table_index)
-                    .and_then(|table| match table {
-                        Table::FunctionTable(table) => Some(&mut **table),
-                        _ => None,
-                    })
-                    .ok_or_else(|| invalid_data("invalid table index"))?;
-
-                let table = table
-                    .get_mut(offset.as_usize()..)
-                    .ok_or_else(|| invalid_data("invalid offset"))?;
-                let len = values.len().min(table.len());
-                let table = &mut table[..len];
-                table.copy_from_slice(&values)
-            })
-        };
-
-        let oom_to_error = |_| invalid_data("wasm module requires too much memory");
-
-        Self::create(
-            types,
-            functions,
-            sections
-                .table
-                .map(|sec| sec.tables.try_map(Table::try_from))
-                .transpose()
-                .map_err(oom_to_error)?
-                .unwrap_or_default(),
-            sections
-                .memory
-                .map(|sec| sec.memories.try_map(MemoryBuffer::new))
-                .transpose()
-                .map_err(oom_to_error)?
-                .unwrap_or_default(),
-            sections
-                .export
-                .map(|sec| {
-                    sec.exports
-                        .into_iter()
-                        .map(|exp| (exp.name, exp.description))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            global_stubs,
-            sections.data.map(|data| data.data).unwrap_or_default(),
-            sections
-                .element
-                .map(|element| element.elements)
-                .unwrap_or_default(),
-            sections.start,
-            [
-                Box::new(global_setter) as Constructor,
-                Box::new(memory_setter) as Constructor,
-                Box::new(table_setter) as Constructor,
-            ],
-        )
-    }
-
-    pub fn with_imports<'a, S1: Into<Cow<'a, str>>, S2: Into<Cow<'a, str>>>(
-        binary: WasmBinary,
-        imports: impl IntoIterator<Item = ((S1, S2), Import)>,
-    ) -> anyhow::Result<Self> {
-        let prelude_imports = match binary.version {
-            WasmVersion::Version1 => {
-                wasi_snapshot_preview1::import_object()
-                    .into_iter()
-                    .map(|(name, import)| {
-                        (
-                            (Cow::Borrowed("wasi_snapshot_preview1"), Cow::Borrowed(name)),
-                            Resolve {
-                                import: import.0,
-                                prelude: true,
-                            },
-                        )
-                    })
-            }
-        };
-
-        let imports = imports.into_iter().map(|((s1, s2), i)| {
-            ((s1.into(), s2.into()), {
-                Resolve {
-                    import: i.0,
-                    prelude: false,
-                }
-            })
-        });
-
-        let mut imports_object = HashMap::new();
-        for ((module, name), import) in prelude_imports.chain(imports) {
-            match imports_object.entry((module, name)) {
-                Entry::Occupied(entry) => {
-                    let (module, name) = entry.key();
-                    return Err(invalid_data(format!(
-                        "duplicate import key [{module}]::[{name}]"
-                    )));
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(import);
-                }
-            }
-        }
-
-        Self::with_resolver(binary.sections, imports_object)
-    }
-
-    pub fn new(binary: WasmBinary) -> anyhow::Result<Self> {
-        Self::with_imports::<&str, &str>(binary, [])
+    pub fn new(store: Store) -> anyhow::Result<Self> {
+        VirtualMachine::with_options(store, VirtualMachineOptions::default())
     }
 }
 
-impl WasmVirtualMachine {
-    pub(crate) fn load_global(&self, local: GlobalIndex) -> Option<Value> {
-        self.globals.get(local.0).map(|glob| glob.load())
-    }
-
-    pub(crate) fn store_global(&self, local: GlobalIndex, value: Value) -> Result<(), ()> {
-        self.globals
-            .get(local.0)
-            .ok_or(())
-            .and_then(|glob| glob.store(value))
-    }
-
+impl VirtualMachine {
     pub(crate) fn call_unchecked(
         &self,
         function: &FunctionInner,
-        stack: &mut Vec<Value>,
+        stack: &mut ValueStack,
         call_depth: usize,
     ) -> Result<(), Trap> {
         let locals = match &function.body {
             Body::WasmDefined(wasm_func) => {
-                let params = &*self
-                    .types
-                    .get(function.r#type.0)
-                    .expect("function should have valid type info")
-                    .parameters;
-
-                let params_iter = params.iter();
-                let params = stack.drain(stack.len() - params.len()..);
-
-                debug_assert!(
-                    params_iter
-                        .copied()
-                        .eq(params.as_slice().iter().map(|val| val.r#type()))
-                );
-
-                let locals = params
-                    .chain(wasm_func.locals.iter().map(|&ty| Value::new(ty)))
+                let locals = stack
+                    .0
+                    .drain(stack.len() - wasm_func.parameters_len.as_usize()..)
+                    .chain(wasm_func.locals.iter().copied())
                     .collect::<Box<[_]>>();
                 WasmVec::from_trusted_box(locals)
             }
-            Body::Import(_) => const { WasmVec::new() },
+            Body::Import(_) => const { WasmVec::new() }
         };
 
         let mut context = WasmContext {
@@ -950,7 +628,7 @@ impl WasmVirtualMachine {
 
         match &function.body {
             Body::WasmDefined(func) => func.body.eval(&mut context),
-            Body::Import(imp) => (imp.body)(&mut context),
+            Body::Import(imp) => imp(&mut context),
         }
     }
 }
@@ -969,6 +647,7 @@ pub enum GetExportError {
 macro_rules! get_export {
     ($self:expr; find $param: expr;$expected: literal | $name:ident) => {
         $self
+            .store
             .exports
             .get($param)
             .and_then(|&interface| match interface {
@@ -979,12 +658,12 @@ macro_rules! get_export {
 }
 
 pub struct UntypedFunction<'a> {
-    vm: &'a WasmVirtualMachine,
+    vm: &'a VirtualMachine,
     function: &'a FunctionInner,
 }
 
 pub struct Function<'a, T, U> {
-    vm: &'a WasmVirtualMachine,
+    vm: &'a VirtualMachine,
     function: &'a FunctionInner,
     _marker: PhantomData<fn(T) -> U>,
 }
@@ -993,9 +672,15 @@ pub struct Function<'a, T, U> {
 #[error("wasm execution trapped")]
 pub struct Trap(());
 
+impl Default for Trap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Trap {
     #[cold]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Trap(())
     }
 }
@@ -1020,7 +705,7 @@ impl<'a> UntypedFunction<'a> {
     pub fn cast<T: FunctionInput, U: FunctionOutput>(
         self,
     ) -> Result<Function<'a, T, U>, MismatchedFunctionType> {
-        let r#type = self.vm.types.get(self.function.r#type.0).unwrap();
+        let r#type = self.vm.store.types.get(self.function.r#type.0).unwrap();
 
         if !T::subtype(&r#type.parameters) || !U::subtype(&r#type.result) {
             return Err(MismatchedFunctionType {
@@ -1064,7 +749,7 @@ macro_rules! define_resource_getters {
     ) => {
         paste::paste! {
             pub fn [<get_ $resource_type>](&self, index: [<$capitalized_resource Index>]) -> Option<$return_type> {
-                self.$collection.get(index.0)$(.map(|x| ($map_expr)(self, x)))?
+                self.store.$collection.get(index.0)$(.map(|x| ($map_expr)(self, x)))?
             }
 
             pub fn [<get_ $resource_type _by_name>](&self, name: &str) -> Option<$return_type> {
@@ -1078,7 +763,7 @@ macro_rules! define_resource_getters {
     };
 }
 
-impl WasmVirtualMachine {
+impl VirtualMachine {
     define_resource_getters!(
         function,
         Function,
@@ -1105,9 +790,9 @@ impl WasmVirtualMachine {
         &self,
         function: FunctionIndex,
     ) -> Result<Function<T, U>, GetFunctionError> {
-        let Some(function) = self.get_function(function) else {
-            return Err(GetFunctionError::FunctionDoesntExist);
-        };
+        let function = self
+            .get_function(function)
+            .ok_or(GetFunctionError::FunctionDoesntExist)?;
 
         function.cast().map_err(Into::into)
     }
@@ -1148,7 +833,7 @@ impl WasmVirtualMachine {
     }
 
     pub fn start(&self) -> Result<(), CallError> {
-        if let Some(start) = self.start {
+        if let Some(start) = self.store.start {
             return self.call(start, ());
         }
 
@@ -1156,10 +841,51 @@ impl WasmVirtualMachine {
     }
 }
 
+type Word = u32;
+
+#[derive(Debug)]
+pub(crate) struct ValueStack(pub(crate) Vec<Word>);
+
+impl ValueStack {
+    pub(crate) const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn peek<T: ValueInner>(&self) -> Option<&WordAlign<T>> {
+        T::ref_from_words(&self.0)
+    }
+
+    pub(crate) fn pop<T: ValueInner>(&mut self) -> Option<T> {
+        T::from_words(&mut self.0)
+    }
+
+    pub(crate) fn push<T: ValueInner>(&mut self, value: T) {
+        T::push_words(value, &mut self.0)
+    }
+}
+
+pub(crate) fn values_len(values: &[ValueType]) -> anyhow::Result<Index> {
+    values
+        .iter()
+        .try_fold(0_u32, |size, ty| {
+            size.checked_add(ty.word_size())
+        })
+        .map(Index)
+        .context("too many arguments")
+}
+
 pub struct WasmContext<'a> {
-    pub(crate) virtual_machine: &'a WasmVirtualMachine,
-    pub(crate) locals: WasmVec<Value>,
-    pub(crate) stack: &'a mut Vec<Value>,
+    pub(crate) virtual_machine: &'a VirtualMachine,
+    pub(crate) locals: WasmVec<Word>,
+    pub(crate) stack: &'a mut ValueStack,
     pub(crate) call_depth: usize,
 }
 
@@ -1179,11 +905,11 @@ impl<'a> WasmContext<'a> {
     }
 
     pub(crate) fn get_function(&self, function: FunctionIndex) -> Option<&'a FunctionInner> {
-        self.virtual_machine.functions.get(function.0)
+        self.virtual_machine.store.functions.get(function.0)
     }
 
-    pub(crate) fn get_local(&mut self, local: LocalIndex) -> Option<&mut Value> {
-        self.locals.get_mut(local.0)
+    pub(crate) fn get_local<T: ValueInner>(&mut self, local: LocalIndex) -> Option<&mut WordAlign<T>> {
+        T::get_mut(local, &mut self.locals)
     }
 
     pub(crate) fn table_load(
@@ -1192,6 +918,7 @@ impl<'a> WasmContext<'a> {
         index: Index,
     ) -> Option<ReferenceValue> {
         self.virtual_machine
+            .store
             .tables
             .get(table_index.0)
             .and_then(|table| match table {
@@ -1204,6 +931,7 @@ impl<'a> WasmContext<'a> {
 
     pub(crate) fn mem(&self, mem_index: MemoryIndex) -> Result<&MemoryBuffer, MemoryFault> {
         self.virtual_machine
+            .store
             .memory
             .get(mem_index.0)
             .ok_or_else(MemoryFault::new)
@@ -1246,6 +974,7 @@ impl<'a> WasmContext<'a> {
     ) -> Result<(), MemoryFault> {
         let data = self
             .virtual_machine
+            .store
             .data
             .get(data.0)
             .ok_or_else(MemoryFault::new)?;
@@ -1283,25 +1012,22 @@ impl<'a> WasmContext<'a> {
 
     pub(crate) fn mem_size(&self, mem_index: MemoryIndex) -> Result<Index, MemoryFault> {
         self.virtual_machine
+            .store
             .memory
             .get(mem_index.0)
             .ok_or_else(MemoryFault::new)
             .map(|mem| mem.size())
     }
 
-    pub(crate) fn peek(&self) -> Option<&Value> {
-        self.stack.last()
+    pub(crate) fn peek<T: ValueInner>(&self) -> Option<&WordAlign<T>> {
+        self.stack.peek()
     }
 
-    pub(crate) fn pop(&mut self) -> Option<Value> {
+    pub(crate) fn pop<T: ValueInner>(&mut self) -> Option<T> {
         self.stack.pop()
     }
 
-    pub(crate) fn pop_n<const N: usize>(&mut self) -> Option<[Value; N]> {
-        self.stack.pop_n()
-    }
-
-    pub(crate) fn push(&mut self, value: Value) {
+    pub(crate) fn push<T: ValueInner>(&mut self, value: T) {
         self.stack.push(value)
     }
 }

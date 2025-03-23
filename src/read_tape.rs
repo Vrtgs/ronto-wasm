@@ -77,7 +77,10 @@ impl<R: Read> ReadTape<R> {
     }
 
     pub fn put_chunk<const N: usize>(&mut self, chunk: [u8; N]) {
-        chunk.into_iter().rev().for_each(|byte| self.scratch.push_front(byte))
+        chunk
+            .into_iter()
+            .rev()
+            .for_each(|byte| self.scratch.push_front(byte))
     }
 
     pub fn read_byte(&mut self) -> io::Result<u8> {

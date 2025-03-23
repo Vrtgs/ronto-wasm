@@ -1,18 +1,18 @@
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::parser::{
-    DataIndex, ExternIndex, FunctionIndex, GlobalIndex, LocalIndex, MemoryArgument, MemoryIndex,
-    ReferenceType, TableIndex, TagByte, TypeIndex, ValueType,
+    DataIndex, ExternIndex, FunctionIndex, MemoryArgument, MemoryIndex,
+    ReferenceType, TableIndex, TagByte, TypeIndex,
 };
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-use crate::runtime::{ReferenceValue, Trap, Value, ValueInner, WasmContext};
+use crate::runtime::{ReferenceValue, Trap, ValueInner, WasmContext, WordAlign};
 use crate::vector::Index;
 use bytemuck::Pod;
 use std::marker::PhantomData;
 
-pub(super) trait InstructionCode<Data> {
-    fn validate(&self, data: Data, compiler: &mut ActiveCompilation) -> bool;
-    fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult;
+pub(super) trait TypedInstructionCode<Data> {
+    fn validate(self, data: Data, compiler: &mut ActiveCompilation) -> bool;
+    fn call(self, data: Data, context: &mut WasmContext) -> ExecutionResult;
 }
 
 impl<
@@ -20,9 +20,9 @@ impl<
     In: FunctionInput,
     Out: FunctionOutput,
     F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>,
-> InstructionCode<Data> for Primitive<Data, In, Out, F>
+> TypedInstructionCode<Data> for Primitive<Data, In, Out, F>
 {
-    fn validate(&self, _: Data, compiler: &mut ActiveCompilation) -> bool {
+    fn validate(self, _: Data, compiler: &mut ActiveCompilation) -> bool {
         let res = In::get_from_compiler(compiler);
         if res {
             Out::update_compiler(compiler)
@@ -30,7 +30,7 @@ impl<
         res
     }
 
-    fn call(&self, data: Data, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, data: Data, context: &mut WasmContext) -> ExecutionResult {
         let input = In::get(context.stack);
         (self.f)(data, input, context).map(|x| Out::push(x, context.stack))
     }
@@ -58,7 +58,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-    Primitive<Data, In, Out, F>
+Primitive<Data, In, Out, F>
 {
     pub(super) const fn full(f: F) -> Self {
         Self {
@@ -70,8 +70,8 @@ impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
 
 pub(super) struct RefNull;
 
-impl InstructionCode<&ReferenceType> for RefNull {
-    fn validate(&self, ref_ty: &ReferenceType, compiler: &mut ActiveCompilation) -> bool {
+impl TypedInstructionCode<&ReferenceType> for RefNull {
+    fn validate(self, ref_ty: &ReferenceType, compiler: &mut ActiveCompilation) -> bool {
         match ref_ty {
             ReferenceType::Function => FunctionIndex::update_compiler(compiler),
             ReferenceType::Extern => ExternIndex::update_compiler(compiler),
@@ -79,43 +79,43 @@ impl InstructionCode<&ReferenceType> for RefNull {
         true
     }
 
-    fn call(&self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
-        context.push(Value::Ref(match ref_ty {
-            ReferenceType::Function => ReferenceValue::Function(FunctionIndex::NULL),
-            ReferenceType::Extern => ReferenceValue::Extern(ExternIndex::NULL),
-        }));
+    fn call(self, ref_ty: &ReferenceType, context: &mut WasmContext) -> ExecutionResult {
+        match ref_ty {
+            ReferenceType::Function => context.push(FunctionIndex::NULL),
+            ReferenceType::Extern => context.push(ExternIndex::NULL),
+        }
         Ok(())
     }
 }
 
 pub(super) struct Call;
 
-impl InstructionCode<&FunctionIndex> for Call {
-    fn validate(&self, &func: &FunctionIndex, compiler: &mut ActiveCompilation) -> bool {
+impl TypedInstructionCode<&FunctionIndex> for Call {
+    fn validate(self, &func: &FunctionIndex, compiler: &mut ActiveCompilation) -> bool {
         compiler.simulate_call(func)
     }
 
-    fn call(&self, &func: &FunctionIndex, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, &func: &FunctionIndex, context: &mut WasmContext) -> ExecutionResult {
         let func = context.get_function(func).unwrap();
         context.call(func)
     }
 }
 
-impl InstructionCode<(&TypeIndex, &TableIndex)> for Call {
+impl TypedInstructionCode<(&TypeIndex, &TableIndex)> for Call {
     fn validate(
-        &self,
+        self,
         (&ty, &table): (&TypeIndex, &TableIndex),
         comp: &mut ActiveCompilation,
     ) -> bool {
         Index::get_from_compiler(comp)
             && comp
-                .get_table(table)
-                .is_some_and(|table| table.reftype == ReferenceType::Function)
+            .get_table(table)
+            .is_some_and(|table| table.reftype == ReferenceType::Function)
             && comp.simulate_call_indirect(ty)
     }
 
     fn call(
-        &self,
+        self,
         (&expected_ty, &table_idx): (&TypeIndex, &TableIndex),
         context: &mut WasmContext,
     ) -> ExecutionResult {
@@ -131,65 +131,6 @@ impl InstructionCode<(&TypeIndex, &TableIndex)> for Call {
         }
 
         context.call(func)
-    }
-}
-
-trait VariableIndex: Copy {
-    fn exists(self, compiler: &mut ActiveCompilation) -> bool;
-    fn mutable(self, compiler: &mut ActiveCompilation) -> bool;
-    fn r#type(self, compiler: &mut ActiveCompilation) -> ValueType;
-    fn load(self, context: &mut WasmContext) -> Value;
-    fn store(self, value: Value, context: &mut WasmContext);
-}
-
-impl VariableIndex for LocalIndex {
-    fn exists(self, compiler: &mut ActiveCompilation) -> bool {
-        compiler.get_local(self).is_some()
-    }
-
-    fn mutable(self, _: &mut ActiveCompilation) -> bool {
-        true
-    }
-
-    fn r#type(self, compiler: &mut ActiveCompilation) -> ValueType {
-        // `exists` should always run before `type`
-        compiler.get_local(self).unwrap()
-    }
-
-    fn load(self, context: &mut WasmContext) -> Value {
-        // due to validation, we exist
-        *context.get_local(self).unwrap()
-    }
-
-    fn store(self, value: Value, context: &mut WasmContext) {
-        // due to validation, we exist
-        *context.get_local(self).unwrap() = value
-    }
-}
-
-impl VariableIndex for GlobalIndex {
-    fn exists(self, compiler: &mut ActiveCompilation) -> bool {
-        compiler.get_global(self).is_some()
-    }
-
-    fn mutable(self, compiler: &mut ActiveCompilation) -> bool {
-        // `exists` should always run before `mutable`
-        compiler.get_global(self).unwrap().mutable
-    }
-
-    fn r#type(self, compiler: &mut ActiveCompilation) -> ValueType {
-        // `exists` should always run before `type`
-        compiler.get_global(self).unwrap().value_type
-    }
-
-    fn load(self, context: &mut WasmContext) -> Value {
-        // due to validation, we exist
-        context.virtual_machine.load_global(self).unwrap()
-    }
-
-    fn store(self, value: Value, context: &mut WasmContext) {
-        // due to validation, we exist and are mutable
-        context.virtual_machine.store_global(self, value).unwrap()
     }
 }
 
@@ -215,51 +156,12 @@ macro_rules! access_type {
     };
 }
 
-pub(super) struct VariableAccess<I, const A: usize>(pub PhantomData<[I; A]>);
 
-impl<I: VariableIndex, const A: usize> InstructionCode<&I> for VariableAccess<I, A> {
-    fn validate(&self, &index: &I, compiler: &mut ActiveCompilation) -> bool {
-        let exists = index.exists(compiler);
-        let mut has_valid_signature = move || {
-            let index_ty = index.r#type(compiler);
-            let valid_stack = match access_type!(@fetch A) {
-                AccessType::Get => {
-                    compiler.push(index_ty);
-                    return true;
-                }
-                AccessType::Set => compiler.pop().is_some_and(|ty| ty == index_ty),
-                AccessType::Tee => compiler.peek().is_some_and(|&ty| ty == index_ty),
-            };
-
-            valid_stack && index.mutable(compiler)
-        };
-
-        exists && has_valid_signature()
-    }
-
-    fn call(&self, &index: &I, context: &mut WasmContext) -> ExecutionResult {
-        match access_type!(@fetch A) {
-            AccessType::Get => {
-                let value = index.load(context);
-                context.push(value);
-            }
-            AccessType::Set => {
-                let value = context.pop().unwrap();
-                index.store(value, context)
-            }
-            AccessType::Tee => {
-                let value = *context.peek().unwrap();
-                index.store(value, context)
-            }
-        }
-        Ok(())
-    }
-}
 
 pub(super) struct MemoryAccess<T, const A: usize>(pub PhantomData<[T; A]>);
 
-impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryAccess<T, A> {
-    fn validate(&self, &_: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
+impl<T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument> for MemoryAccess<T, A> {
+    fn validate(self, &_: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let res = u32::get_from_compiler(compiler);
@@ -279,22 +181,22 @@ impl<T: ValueInner, const A: usize> InstructionCode<&MemoryArgument> for MemoryA
         }
     }
 
-    fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index::get(context.stack);
                 let value = context.mem_load::<T>(MemoryIndex::ZERO, mem_arg, index)?;
-                context.push(value.into());
+                context.push(value);
             }
             AccessType::Set => {
-                let value = context.pop().and_then(T::from).unwrap();
+                let value = T::get(context.stack);
                 let index = Index::get(context.stack);
                 context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
             AccessType::Tee => {
                 let index = Index::get(context.stack);
-                let value = context.peek().and_then(T::from_ref).unwrap();
-                context.mem_store::<T>(MemoryIndex::ZERO, mem_arg, index, value)?;
+                let value = context.peek::<T>().unwrap();
+                context.mem_store::<WordAlign<T>>(MemoryIndex::ZERO, mem_arg, index, value)?;
             }
         }
         Ok(())
@@ -334,23 +236,23 @@ macro_rules! impl_extend {
 impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
-impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgument>
-    for CastingMemoryAccess<T, E, A>
+impl<T: ValueInner, E: Extend<T>, const A: usize> TypedInstructionCode<&MemoryArgument>
+for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
-    fn validate(&self, mem_arg: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
-        MemoryAccess::<T, A>::validate(&MemoryAccess(PhantomData), mem_arg, compiler)
+    fn validate(self, mem_arg: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
+        MemoryAccess::<T, A>::validate(MemoryAccess(PhantomData), mem_arg, compiler)
     }
 
-    fn call(&self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index::get(context.stack);
                 let value = context.mem_load::<E>(MemoryIndex::ZERO, mem_arg, index)?;
-                context.push(E::extend(value).into());
+                context.push(E::extend(value));
             }
             AccessType::Set => {
-                let value = context.pop().and_then(T::from).map(E::narrow).unwrap();
+                let value = E::narrow(T::get(context.stack));
                 let index = Index::get(context.stack);
                 context.mem_store::<E>(MemoryIndex::ZERO, mem_arg, index, &value)?;
             }
@@ -362,13 +264,15 @@ impl<T: ValueInner, E: Extend<T>, const A: usize> InstructionCode<&MemoryArgumen
 
 pub(super) struct MemoryInit;
 
-impl InstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
-    fn validate(&self, (_, _): (&DataIndex, &TagByte<0x00>), _: &mut ActiveCompilation) -> bool {
-        todo!()
+impl TypedInstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
+    fn validate(self, (&data, _): (&DataIndex, &TagByte<0x00>), comp: &mut ActiveCompilation) -> bool {
+        comp.has_memory(MemoryIndex::ZERO)
+            && comp.has_data(data)
+            && <(Index, Index, Index)>::get_from_compiler(comp)
     }
 
     fn call(
-        &self,
+        self,
         (&data, _): (&DataIndex, &TagByte<0x00>),
         context: &mut WasmContext,
     ) -> ExecutionResult {

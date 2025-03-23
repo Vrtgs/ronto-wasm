@@ -80,26 +80,18 @@ pub struct MemoryBuffer {
     buffer: RefCell<Vec<u8>>,
 }
 
-macro_rules! assign_or {
-    ($name: ident = $expr:expr; $fail:expr) => {
-        let Some($name) = $expr else {
-            return Err($fail);
-        };
-    };
-}
-
-macro_rules! assign_or_fault {
-    ($name: ident = $expr:expr) => {
-        assign_or!($name = $expr; MemoryFault::new())
-    };
-}
-
 macro_rules! access {
     (&$(mut $(@$_mut:tt)?)? $buffer:expr, $memory_argument:expr, $addr:expr $(, $size:expr)?; try { $map: expr }) => {{
         paste::paste! { let buffer = & $(mut $(@$_mut)?)? ** $buffer.[<borrow $(_mut $($_mut)?)?>](); }
 
-        assign_or_fault!(addr = $memory_argument.offset().0.checked_add($addr.0).map(Index));
-        $(assign_or_fault!(end  = addr.as_usize().checked_add($size));)?
+        let addr = $memory_argument
+            .offset()
+            .0
+            .checked_add($addr.0)
+            .map(Index)
+            .ok_or_else(MemoryFault::new)?;
+        
+        $(let end  = addr.as_usize().checked_add($size).ok_or_else(MemoryFault::new)?;)?
 
         let range = addr.as_usize()..$({
             if false {
@@ -108,7 +100,7 @@ macro_rules! access {
             end
         })?;
 
-        paste::paste! { assign_or_fault!(bytes = buffer.[<get $(_mut $($_mut)?)?>](range));  }
+        paste::paste! { let bytes = buffer.[<get $(_mut $($_mut)?)?>](range).ok_or_else(MemoryFault::new)?;  }
 
         if (bytes.as_ptr().addr() % $memory_argument.align()) != 0 {
             #[cold]
@@ -152,7 +144,11 @@ impl MemoryBuffer {
         let buffer = &mut *self.buffer.borrow_mut();
         let top = Index(Index::from_usize(buffer.len()).0 / PAGE_SIZE);
 
-        assign_or!(additional = additional.0.checked_mul(PAGE_SIZE).map(Index); OutOfMemory::new());
+        let additional = additional
+            .0
+            .checked_mul(PAGE_SIZE)
+            .map(Index)
+            .ok_or_else(OutOfMemory::new)?;
 
         if Index::from_usize(buffer.len())
             .0
@@ -285,7 +281,7 @@ impl MemoryBuffer {
         let buffer = &mut **self.buffer.borrow_mut();
 
         let src_start = src;
-        assign_or_fault!(src_end = src.0.checked_add(n.0).map(Index));
+        let src_end = src.0.checked_add(n.0).map(Index).ok_or_else(MemoryFault::new)?;
 
         if src_end.as_usize() > buffer.len() || dest.as_usize() > buffer.len() - n.as_usize() {
             return Err(MemoryFault::new());

@@ -363,16 +363,43 @@ decodable! {
     }
 }
 
+#[allow(non_upper_case_globals)]
+impl ValueType {
+    pub const I32: Self = ValueType::NumericType(NumericType::I32);
+    pub const I64: Self = ValueType::NumericType(NumericType::I64);
+    pub const F32: Self = ValueType::NumericType(NumericType::F32);
+    pub const F64: Self = ValueType::NumericType(NumericType::F64);
+    pub const V128: Self = ValueType::NumericType(NumericType::V128);
+    pub const Function: Self = ValueType::ReferenceType(ReferenceType::Function);
+    pub const Extern: Self = ValueType::ReferenceType(ReferenceType::Extern);
+
+    pub fn word_size(self) -> u32 {
+        match self.bits() {
+            ValueBitsType::I32 => 1,
+            ValueBitsType::I64 => 2,
+            ValueBitsType::V128 => 4,
+        }
+    }
+
+    pub fn bits(self) -> ValueBitsType {
+        match self {
+            Self::I32 | Self::F32 | Self::ReferenceType(_) => ValueBitsType::I32,
+            Self::I64 | Self::F64 => ValueBitsType::I64,
+            Self::V128 => ValueBitsType::V128,
+        }
+    }
+}
+
 impl Display for ValueType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let ty = match self {
-            ValueType::NumericType(NumericType::I32) => "i32",
-            ValueType::NumericType(NumericType::I64) => "i64",
-            ValueType::NumericType(NumericType::F32) => "f32",
-            ValueType::NumericType(NumericType::F64) => "f64",
-            ValueType::NumericType(NumericType::V128) => "v128",
-            ValueType::ReferenceType(ReferenceType::Function) => "funcref",
-            ValueType::ReferenceType(ReferenceType::Extern) => "externref",
+        let ty = match *self {
+            ValueType::I32 => "i32",
+            ValueType::I64 => "i64",
+            ValueType::F32 => "f32",
+            ValueType::F64 => "f64",
+            ValueType::V128 => "v128",
+            ValueType::Function => "funcref",
+            ValueType::Extern => "externref",
         };
         f.write_str(ty)
     }
@@ -612,11 +639,11 @@ index_ty! {
 }
 
 impl FunctionIndex {
-    pub const NULL: Self = Self::MAX;
+    pub const NULL: Self = Self(Index::NULL);
 }
 
 impl ExternIndex {
-    pub const NULL: Self = Self::MAX;
+    pub const NULL: Self = Self(Index::NULL);
 }
 
 type MemoryType = Limit;
@@ -742,6 +769,7 @@ decodable! {
 
 use crate::invalid_data;
 use crate::runtime::parameter::fmt_ty_vec;
+use crate::runtime::ValueBitsType;
 use crate::vector::{vector_from_vec, Index, WasmVec};
 
 #[derive(Debug)]
@@ -849,7 +877,10 @@ impl Decode for WasmBinary {
             file.put_chunk(magic);
             let module = file.read_to_string()?;
             let mut module = ReadTape::memory_buffer(wat::parse_str(&module)?);
-            ensure!(module.read_chunk()? == *b"\0asm", "invalid wasm module output from the `wat` crate; please file a bug report");
+            ensure!(
+                module.read_chunk()? == *b"\0asm",
+                "invalid wasm module output from the `wat` crate; please file a bug report"
+            );
 
             return WasmBinary::decode_no_magic(&mut module);
         }
