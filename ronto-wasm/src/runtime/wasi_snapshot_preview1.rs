@@ -108,7 +108,7 @@ pub fn random_get(_: &(), mem: Option<&MemoryBuffer>, (ptr, len): (Index, Index)
 
 #[derive(Debug, Error)]
 #[error("uncaught exit with code {0}")]
-pub struct Exit(i32);
+pub struct Exit(pub i32);
 
 pub fn add_to_linker(linker: &mut Linker) -> Result<(), NameSpaceCollision> {
     let mut module_builder = ModuleImportsBuilder::new(());
