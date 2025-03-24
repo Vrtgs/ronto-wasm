@@ -3,7 +3,6 @@ use super::typed_instruction_code::{
     RefNull, TypedInstructionCode,
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
-use crate::invalid_data;
 use crate::parser::{
     DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument,
     MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
@@ -12,6 +11,7 @@ use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryError;
 use crate::runtime::{Trap, WasmContext};
 use crate::vector::{Index, WasmVec};
+use anyhow::{bail, Context};
 use std::convert::Infallible;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -216,14 +216,14 @@ macro_rules! instruction {
 
                 let second_opcode = file.read_leb128::<u32>()?;
 
-                normalize_match_double!(match ((first_byte, second_opcode)) {
+                Ok(normalize_match_double!(match ((first_byte, second_opcode)) {
                     {$(
                         ($simple_opcode, $($instr_variant)?) => {
-                             Ok(Instruction::Simple(SimpleInstruction::Typed(TypedInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?)))
+                             Instruction::Simple(SimpleInstruction::Typed(TypedInstruction::$simple_ident $(($(<$simple_data>::decode(file)?),*))?))
                         },
                     )+}
-                    {_ => Err(invalid_data(format!("invalid instruction (0x{first_byte:02x}, {second_opcode})")))}
-                })
+                    {_ => bail!("invalid instruction (0x{first_byte:02x}, {second_opcode})")}
+                }))
             }
         }
 
@@ -303,9 +303,9 @@ macro_rules! vector_lane {
 
                     match byte {
                         // Safety:
-                        // u8 in the range of 0..16 is guaranteed to be a valid layout of VectorLane
+                        // u8 in the range of 0..$count is guaranteed to be a valid layout of VectorLane
                         0..$count => Ok(unsafe { std::mem::transmute::<u8, Self>(byte) }),
-                        _ => Err(invalid_data("vector lane must be between 0 and 16"))
+                        _ => anyhow::bail!(concat!("vector lane must be between 0 and", stringify!($count)))
                     }
                 }
             }
@@ -454,7 +454,7 @@ macro_rules! trap_if_zero {
     (<$ty: ty>::$op:ident) => {{
         in_out!(a: $ty, b: $ty;  {
             if b == 0 {
-                return Err(Trap::new());
+                return Err(Trap::divide_by_zero());
             }
             <$ty>::$op(a, b)
         })
@@ -584,11 +584,11 @@ pub struct Optional<T>(pub Option<T>);
 
 impl<T: Decode> Decode for Optional<T> {
     fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
-        match u32::decode(file)? {
-            0 => Ok(Self(None)),
-            1 => Ok(Self(Some(T::decode(file)?))),
-            _ => Err(invalid_data("too many items in vector")),
-        }
+        Ok(match u32::decode(file)? {
+            0 => Self(None),
+            1 => Self(Some(T::decode(file)?)),
+            _ => bail!("too many items in optional segment"),
+        })
     }
 }
 
@@ -635,7 +635,7 @@ impl BlockType {
                 types
                     .get(idx)
                     .map(|info| (&*info.parameters, &*info.result))
-                    .ok_or_else(|| invalid_data(format!("unresolved type {}", idx.0)))
+                    .with_context(|| format!("unresolved type {}", idx.0))
             }
         }
     }

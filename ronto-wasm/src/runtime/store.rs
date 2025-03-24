@@ -7,8 +7,8 @@ use crate::parser::{
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::runtime::{values_len, Body, Constructor, FunctionInner, GlobalValueInner, Import, Linker, ReferenceValue, Table, Value, ValueInner, ValueStack, WasmFunction, WordStore};
 use crate::vector::{vector_from_vec, WasmVec};
-use crate::{invalid_data, Index};
-use anyhow::{ensure, Context};
+use crate::Index;
+use anyhow::{anyhow, bail, ensure, Context};
 use std::collections::HashMap;
 
 pub struct Store {
@@ -52,7 +52,7 @@ impl Store {
     ) -> anyhow::Result<Self> {
         fn collect_wasm_vec<T>(it: impl IntoIterator<Item=T>) -> anyhow::Result<WasmVec<T>> {
             WasmVec::try_from(it.into_iter().collect::<Box<[_]>>())
-                .map_err(|_| invalid_data("too many functions in store"))
+                .context("too many functions in store")
         }
 
         let functions = collect_wasm_vec(functions)?;
@@ -86,20 +86,18 @@ impl Store {
             .map(|fun| fun.signatures)
             .unwrap_or_default();
         let wasm_defined_functions = sections.code.map(|fun| fun.definitions).unwrap_or_default();
-        if wasm_function_types.len() != wasm_defined_functions.len() {
-            return Err(invalid_data("mismatched function signatures and functions"));
-        }
+        ensure!(wasm_function_types.len() == wasm_defined_functions.len(), "mismatched function signatures and functions");
 
         let import_stubs = sections.import.map(|fun| fun.imports).unwrap_or_default();
 
         let (imported_functions, imported_globals, _) = import_stubs
             .into_iter()
             .map(|imp| {
-                let import = linker.get(&imp.module, &imp.name).ok_or_else(|| {
-                    invalid_data(format!(
+                let import = linker.get(&imp.module, &imp.name).with_context(|| {
+                    format!(
                         "unresolved import [{}]::[{}]",
                         imp.module, imp.name
-                    ))
+                    )
                 })?;
 
                 Ok(match (imp.description, import.clone()) {
@@ -128,11 +126,11 @@ impl Store {
                     }
                     (ImportDescription::Memory(imposed_limit), Import::Memory(buffer)) => {
                         if imposed_limit.min > buffer.min() && imposed_limit.max > buffer.max() {
-                            return Err(invalid_data("invalid memory buffer signature"));
+                            bail!("invalid memory buffer signature");
                         }
                         (None, None, Some(buffer))
                     }
-                    _ => return Err(invalid_data("mismatched import type")),
+                    _ => bail!("mismatched import type"),
                 })
             })
             .collect::<anyhow::Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
@@ -234,10 +232,10 @@ impl Store {
             for (i, global_constructor) in global_constructors {
                 global_constructor
                     .const_eval(this)
-                    .ok_or_else(|| invalid_data("global constructor not available in const"))
+                    .context("global constructor not available in const")
                     .and_then(|new_value| {
-                        (*this.globals)[i].store_mut(new_value).map_err(|_| {
-                            invalid_data("Global initialization failed, invalid return")
+                        (*this.globals)[i].store_mut(new_value).map_err(|()| {
+                            anyhow!("Global initialization failed, invalid return")
                         })
                     })?
             }
@@ -248,10 +246,10 @@ impl Store {
         let _const_eval_offset = |this: &Store, offset: &Expression| {
             offset
                 .const_eval(this)
-                .ok_or_else(|| invalid_data("active element offset not available in const"))
+                .context("active element offset not available in const")
                 .and_then(|val| {
                     <Index as ValueInner>::from(val)
-                        .ok_or_else(|| invalid_data("invalid offset type"))
+                        .context("invalid offset type")
                 })
         };
 
@@ -279,11 +277,9 @@ impl Store {
                 let buff = this
                     .memory
                     .get(memory_index)
-                    .ok_or_else(|| invalid_data("invalid memory index offset"))?;
+                    .context("invalid memory index offset")?;
 
-                buff.init(offset, &data.init).map_err(|_| {
-                    invalid_data("invalid memory operation performed by active segment")
-                })?;
+                buff.init(offset, &data.init).context("invalid memory operation performed by active segment")?;
             })
         };
 
@@ -297,7 +293,7 @@ impl Store {
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| invalid_data("invalid element initialization"))?;
+                    .context("invalid element initialization")?;
 
                 let table = this
                     .tables
@@ -306,18 +302,18 @@ impl Store {
                         Table::FunctionTable(table) => Some(&mut **table),
                         _ => None,
                     })
-                    .ok_or_else(|| invalid_data("invalid table index"))?;
+                    .context("invalid table index")?;
 
                 let table = table
                     .get_mut(offset.as_usize()..)
-                    .ok_or_else(|| invalid_data("invalid offset"))?;
+                    .context("invalid offset")?;
                 let len = values.len().min(table.len());
                 let table = &mut table[..len];
                 table.copy_from_slice(&values)
             })
         };
 
-        let oom_to_error = |_| invalid_data("wasm module requires too much memory");
+        let oom_to_error = |_| anyhow!("wasm module requires too much memory");
 
         Self::create(
             types,

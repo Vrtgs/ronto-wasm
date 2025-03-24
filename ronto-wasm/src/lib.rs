@@ -1,7 +1,5 @@
-#![recursion_limit = "1024"]
+#![recursion_limit = "256"]
 
-use std::error::Error;
-use std::io;
 use std::mem::MaybeUninit;
 
 mod expression;
@@ -43,17 +41,12 @@ impl<T> Stack<T> for Vec<T> {
     }
 }
 
-pub(crate) fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyhow::Error {
-    io::Error::new(io::ErrorKind::InvalidData, err).into()
-}
 
 #[cfg(test)]
 mod tests {
     use crate::parse_module;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-    use crate::runtime::{
-        wasi_snapshot_preview1, CallError, GetFunctionError, Store, VirtualMachine,
-    };
+    use crate::runtime::{wasi_snapshot_preview1, CallError, GetFunctionError, Linker, Store, VirtualMachine};
     use crate::vector::Index;
     use anyhow::bail;
     use base64::prelude::BASE64_STANDARD;
@@ -70,14 +63,18 @@ mod tests {
 
     fn get_vm(path: impl AsRef<Path>) -> anyhow::Result<VirtualMachine> {
         let prefix = match path.as_ref().extension().map(OsStr::as_encoded_bytes) {
-            Some(b"wast" | b"wat") => Path::new("./test-files/hardcoded-tests"),
-            Some(b"wasm") => Path::new("./test-files/test-modules"),
+            Some(b"wast" | b"wat") => Path::new("../test-files/hardcoded-tests"),
+            Some(b"wasm") => Path::new("../test-files/test-modules"),
             _ => bail!("unknown wasm test module"),
         };
 
+        let mut linker = Linker::new();
+        wasi_snapshot_preview1::add_to_linker(&mut linker)
+            .expect("new linker made, impossible to have namespace collision already");
+
         let store = Store::with_linker(
             parse_module(File::open(prefix.join(path))?)?,
-            &wasi_snapshot_preview1::import_object(),
+            &linker,
         )?;
         VirtualMachine::new(store)
     }
@@ -278,7 +275,7 @@ mod tests {
         let vm = get_vm("decode_image.wasm")?;
         let mem = vm.get_memory_by_name("memory").unwrap();
 
-        for image in std::fs::read_dir("./test-files/assets/images")? {
+        for image in std::fs::read_dir("../test-files/assets/images")? {
             let image_path = image?.path();
             let image_bytes = std::fs::read(&image_path)?;
             let image = image::load_from_memory(&image_bytes)?;

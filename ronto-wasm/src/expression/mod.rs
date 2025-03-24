@@ -12,16 +12,15 @@ use crate::runtime::memory_buffer::MemoryFault;
 use crate::runtime::parameter::sealed::SealedInput;
 use crate::runtime::{values_len, ReferenceValue, Store, Trap, Value, WasmContext};
 use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::{invalid_data, Stack};
+use crate::Stack;
 use anyhow::{bail, ensure, Context};
 use std::cmp::PartialEq;
 use std::io::Read;
-use std::iter;
 
 impl From<MemoryFault> for Trap {
     #[cold]
     fn from(_: MemoryFault) -> Self {
-        Trap::new()
+        Trap::memory_fault()
     }
 }
 
@@ -249,9 +248,8 @@ impl Compile for IncompleteJump {
             IncompleteJump::JumpTable(table, fallback) => {
                 let takes = fallback.takes();
                 let table = table.try_map(|label| {
-                    if label.takes() != takes {
-                        return Err(invalid_data("mismatched_types"));
-                    }
+                    ensure!(label.takes() == takes, "mismatched_types");
+
                     Ok(JumpTableEntry {
                         goto: label.goto,
                         return_address: label.return_address,
@@ -301,9 +299,7 @@ impl Compile for UntypedInstruction {
 
 impl Compile for TypedInstruction {
     fn compile(self, compiler: &mut ActiveCompilation) -> anyhow::Result<CompiledInstruction> {
-        if !self.simulate(compiler) {
-            return Err(invalid_data(format!("invalid instruction {}", self.name())));
-        }
+        ensure!(self.simulate(compiler), "invalid instruction {}", self.name());
         Ok(CompiledInstruction::Typed(self))
     }
 }
@@ -398,13 +394,11 @@ impl ActiveCompilation<'_, '_> {
         if data.len() > stack.len() {
             self.values_len.0 = 0;
             stack.clear();
-            return Err(invalid_data("not enough elements on the stack"));
+            bail!("not enough elements on the stack")
         }
 
         self.values_len.0 -= values_len(data)?.0;
-        if stack.drain(stack.len() - data.len()..).as_slice() != data {
-            return Err(invalid_data("type mismatched"));
-        }
+        ensure!(stack.drain(stack.len() - data.len()..).as_slice() == data, "type mismatched");
 
         Ok(())
     }
@@ -443,7 +437,7 @@ impl ActiveCompilation<'_, '_> {
             .iter()
             .nth_back(idx.0.as_usize())
             .cloned()
-            .ok_or_else(|| invalid_data(format!("couldn't resolve label {}", idx.0.0)))
+            .with_context(|| format!("couldn't resolve label {}", idx.0.0))
     }
 
     fn add_label(&mut self, label: Label) -> anyhow::Result<()> {
@@ -455,7 +449,7 @@ impl ActiveCompilation<'_, '_> {
     fn pop_label(&mut self) -> anyhow::Result<Label> {
         if self.labels.len() <= 1 {
             assert_ne!(self.labels.len(), 0);
-            return Err(invalid_data("can't pop the function label"));
+            bail!("can't pop the function label")
         }
 
         let label = self.labels.pop().unwrap();
@@ -479,55 +473,14 @@ impl ActiveCompilation<'_, '_> {
 
 
     fn compile(mut self) -> anyhow::Result<FunctionBody> {
-        let mut instructions = std::mem::take(&mut self.instructions);
-
-        let mut prefix_nop = Vec::<u32>::with_capacity(instructions.len() + 1);
-        prefix_nop.push(0);
-        for instruction in &instructions {
-            let mut nop_count = prefix_nop.last().copied().unwrap();
-            if let CompiledInstruction::Typed(TypedInstruction::Nop) = instruction {
-                nop_count += 1;
-            }
-            prefix_nop.push(nop_count)
-        }
-
-        instructions.retain_mut(|instr| {
-            let apply_offset = |jmp: &mut Index| {
-                if let Some(offset) = prefix_nop.get(jmp.as_usize()).copied() {
-                    jmp.0 -= offset
-                }
-            };
-
-            match instr {
-                CompiledInstruction::Jump(jmp) => {
-                    match jmp {
-                        JumpType::Jump(jmp) | JumpType::JumpIf(jmp) => apply_offset(&mut jmp.goto),
-                        JumpType::JumpTable { table, fallback, .. } => {
-                            table.iter_mut().chain(iter::once(fallback))
-                                .for_each(|jmp| apply_offset(&mut jmp.goto))
-                        }
-                    }
-                }
-                CompiledInstruction::Typed(TypedInstruction::Nop) => {
-                    return false;
-                }
-                _ => ()
-            }
-            true
-        });
-
-        let instructions = vector_from_vec(instructions)
-            .context("function too long")?;
-
         if !self.hit_unreachable() {
             self.pop_slice(self.expected_output)?;
-            if !self.values.is_empty() {
-                return Err(invalid_data(
-                    "too many values on the stack before function return",
-                ));
-            }
+            ensure!(self.values.is_empty(), "too many values on the stack before function return");
         }
 
+        optimize_instructions::optimize(&mut self);
+        let instructions = vector_from_vec(std::mem::take(&mut self.instructions))
+            .context("function too long")?;
         Ok(FunctionBody { instructions })
     }
 }
@@ -541,7 +494,7 @@ impl<'a> WasmCompilationContext<'a> {
         let function_signature = self
             .types
             .get(ty.0)
-            .ok_or_else(|| invalid_data("invalid type index"))?;
+            .context("invalid type index")?;
 
         let locals = WasmVec::try_from(
             function_signature
@@ -551,7 +504,7 @@ impl<'a> WasmCompilationContext<'a> {
                 .chain(function.locals)
                 .collect::<Box<[_]>>(),
         )
-            .map_err(|_| invalid_data("too many parameters and locals in function"))?;
+            .context("too many parameters and locals in function")?;
 
         Ok((
             function.body,
@@ -585,6 +538,7 @@ impl<'a> WasmCompilationContext<'a> {
 mod desugar;
 mod label_resolution;
 mod push_ast;
+mod optimize_instructions;
 
 impl FunctionBody {
     pub fn new(
@@ -620,7 +574,7 @@ impl FunctionBody {
             //     println!("Next instruction: {:?}", instruction);
             //     std::io::stdin().lines().next().transpose().unwrap();
             // }
-            
+
             match instruction {
                 CompiledInstruction::Jump(jump) => match jump {
                     JumpType::Jump(jmp) => jump!(jmp),
@@ -692,7 +646,7 @@ impl Decode for Expression {
                 }
                 Instruction::ControlFlow(ControlFlowInstruction::Else) => {
                     let Some(r#if @ IncompleteControlFlow::If) = control_flow.last_mut() else {
-                        return Err(invalid_data("unexpected else clause"));
+                        bail!("unexpected else clause");
                     };
                     *r#if = IncompleteControlFlow::IfElse
                 }
@@ -702,12 +656,7 @@ impl Decode for Expression {
             instructions.push(instruction);
         }
 
-        if !control_flow.is_empty() {
-            return Err(invalid_data(format!(
-                "unescaped control flow: {:?}",
-                control_flow
-            )));
-        }
+        ensure!(control_flow.is_empty(), "unescaped control flow: {:?}",control_flow);
 
         Ok(Self {
             instructions: vector_from_vec(instructions)?,

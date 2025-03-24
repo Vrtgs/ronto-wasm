@@ -6,8 +6,8 @@ use crate::parser::{
 use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::vector::{Index, WasmVec};
-use crate::{invalid_data, Stack};
-use anyhow::Context;
+use crate::Stack;
+use anyhow::{ensure, Context};
 use bytemuck::{Pod, Zeroable};
 use crossbeam::atomic::AtomicCell;
 use std::fmt::{Debug, Formatter};
@@ -15,6 +15,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
+
+pub mod trap;
 
 pub mod memory_buffer;
 pub mod parameter;
@@ -24,7 +26,8 @@ pub mod linker;
 pub mod store;
 
 use crate::runtime::linker::{Import, NativeFunction};
-pub use {linker::Linker, store::Store};
+pub use {linker::Linker, store::Store, trap::Trap};
+
 
 #[derive(Debug, Copy, Clone)]
 pub enum ReferenceValue {
@@ -104,7 +107,7 @@ impl Value {
     }
 }
 
-/// # Safety:
+/// # Safety
 /// must have no padding when aligned to 4 bytes
 pub(crate) unsafe trait WordAligned: Pod {}
 
@@ -148,7 +151,7 @@ macro_rules! impl_word_aligned {
         assert_pod::<$ty>();
         assert!(size_of::<$ty>() % size_of::<Word>() == 0 && align_of::<$ty>() >= align_of::<Word>())
     };
-    
+
     unsafe impl WordAligned for $ty {}
     )*};
 }
@@ -565,13 +568,11 @@ pub struct VirtualMachine {
 type Constructor = Box<dyn FnOnce(&mut Store) -> anyhow::Result<()>>;
 
 fn validate_vm(vm: &VirtualMachine) -> anyhow::Result<()> {
-    if vm
-        .store
-        .start
-        .is_some_and(|func| vm.get_typed_function::<(), ()>(func).is_err())
-    {
-        return Err(invalid_data("invalid start function index"));
-    }
+    ensure!(
+        vm.store.start.is_none_or(|func| vm.get_typed_function::<(), ()>(func).is_ok()),
+        "invalid start function index"
+    );
+
 
     for (export_name, &desc) in vm.store.exports.iter() {
         let is_valid = match desc {
@@ -580,9 +581,8 @@ fn validate_vm(vm: &VirtualMachine) -> anyhow::Result<()> {
             ExportDescription::Table(table) => vm.get_table(table).is_some(),
             ExportDescription::Global(global) => vm.get_global(global).is_some(),
         };
-        if !is_valid {
-            return Err(invalid_data(format!("invalid export {export_name}")));
-        }
+
+        ensure!(is_valid, "invalid export {export_name}")
     }
 
     Ok(())
@@ -666,23 +666,6 @@ pub struct Function<'a, T, U> {
     vm: &'a VirtualMachine,
     function: &'a FunctionInner,
     _marker: PhantomData<fn(T) -> U>,
-}
-
-#[derive(Debug, Error)]
-#[error("wasm execution trapped")]
-pub struct Trap(());
-
-impl Default for Trap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Trap {
-    #[cold]
-    pub fn new() -> Self {
-        Trap(())
-    }
 }
 
 impl<T: FunctionInput, U: FunctionOutput> Function<'_, T, U> {
@@ -900,8 +883,8 @@ impl<'a> WasmContext<'a> {
                 .virtual_machine
                 .call_unchecked(function, self.stack, call_depth);
         }
-        eprintln!("maximum recursion depth reached");
-        Err(Trap::new())
+
+        Err(Trap::maximum_recursion_depth())
     }
 
     pub(crate) fn get_function(&self, function: FunctionIndex) -> Option<&'a FunctionInner> {

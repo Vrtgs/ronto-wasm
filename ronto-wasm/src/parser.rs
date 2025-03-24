@@ -1,10 +1,14 @@
 use crate::expression::Expression;
 use crate::read_tape::ReadTape;
-use anyhow::{ensure, Result};
+use anyhow::ensure;
 use std::any::type_name;
+use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::Read;
-use std::marker::PhantomData;
+use std::io::{self, Read};
+
+fn invalid_data(err: impl Into<Box<dyn Error + Send + Sync>>) -> anyhow::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err).into()
+}
 
 macro_rules! expect {
     ($condition:expr, $($errmsg:tt)*) => {
@@ -16,11 +20,11 @@ macro_rules! expect {
 }
 
 pub(crate) trait Decode: Sized {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self>;
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self>;
 }
 
 impl Decode for bool {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         match u8::decode(file)? {
             0 => Ok(false),
             1 => Ok(true),
@@ -33,7 +37,7 @@ macro_rules! impl_decode_for_int {
     ($($ints:ident)*) => {
         $(
             impl Decode for $ints {
-                fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+                fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
                     file.read_leb128().map_err(anyhow::Error::from)
                 }
             }
@@ -45,7 +49,7 @@ macro_rules! impl_decode_naive {
     ($($types:ty)*) => {
         $(
         impl Decode for $types {
-            fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+            fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
                 file.read_chunk().map(<$types>::from_le_bytes).map_err(anyhow::Error::from)
             }
         }
@@ -54,13 +58,13 @@ macro_rules! impl_decode_naive {
 }
 
 impl Decode for u8 {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         file.read_byte().map_err(anyhow::Error::from)
     }
 }
 
 impl Decode for i8 {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         u8::decode(file).map(|byte| byte as i8)
     }
 }
@@ -76,13 +80,6 @@ impl_decode_naive! {
     i128 u128
 }
 
-impl<T: Decode> Decode for PhantomData<T> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
-        let _ = T::decode(file)?;
-        Ok(PhantomData)
-    }
-}
-
 pub(crate) trait Enum: Sized {
     type Discriminant: Decode + Debug + Display + Copy + Clone + 'static;
     const VARIANTS: &'static [Self::Discriminant];
@@ -90,11 +87,11 @@ pub(crate) trait Enum: Sized {
     fn enum_try_decode(
         variant: Self::Discriminant,
         file: &mut ReadTape<impl Read>,
-    ) -> Option<Result<Self>>;
+    ) -> Option<anyhow::Result<Self>>;
 }
 
 impl<E: Enum> Decode for E {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let variant = E::Discriminant::decode(file)?;
         Self::enum_try_decode(variant, file).ok_or_else(|| {
             invalid_data(format!(
@@ -201,7 +198,7 @@ macro_rules! decodable {
 
             #[doc(hidden)]
             #[inline(always)]
-            fn enum_try_decode(variant: Self::Discriminant, file: &mut ReadTape<impl Read>) -> Option<Result<Self>> {
+            fn enum_try_decode(variant: Self::Discriminant, file: &mut ReadTape<impl Read>) -> Option<anyhow::Result<Self>> {
                 <$first_ty as Enum>::enum_try_decode(variant, file).map(|res| res.map(Self::$first_ty))
                     $(.or_else(|| <$rest as Enum>::enum_try_decode(variant, file).map(|res| res.map(Self::$rest))))*
             }
@@ -278,7 +275,7 @@ macro_rules! decodable {
             }
         }
         impl Decode for $name {
-            fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+            fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
                 $(
                 let $field = <$type>::decode(file)?;
                 )*
@@ -296,7 +293,7 @@ macro_rules! decodable {
             )*
         );
         impl Decode for $name {
-            fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+            fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
                 Ok(Self(
                     $(
                     <$type>::decode(file)?,
@@ -319,7 +316,7 @@ impl Debug for CustomSection {
 }
 
 impl Decode for CustomSection {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let length = Index::decode(file)?;
         let bx = file.read(length.as_usize())?;
         Ok(CustomSection(WasmVec::from_trusted_box(bx)))
@@ -409,17 +406,13 @@ impl Display for ValueType {
 pub struct WithLength<T>(pub T);
 
 impl<T: Decode> Decode for WithLength<T> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let length = Index::decode(file)?.as_usize();
         let buffer = file.read(length)?.into_vec();
         let mut tape = ReadTape::memory_buffer(buffer);
         let ret = T::decode(&mut tape)?;
-        if tape.has_data()? {
-            return Err(invalid_data(format!(
-                "`{}` has more data than was decoded",
-                type_name::<T>()
-            )));
-        }
+        ensure!(!tape.has_data()?, "`{}` has more data than was decoded", type_name::<T>());
+
         Ok(Self(ret))
     }
 }
@@ -428,7 +421,7 @@ impl<T: Decode> Decode for WithLength<T> {
 pub struct TagByte<const TAG: u8>;
 
 impl<const TAG: u8> Decode for TagByte<TAG> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         expect!(file.read_byte()? == TAG, "expected next byte to be {}", TAG).map(|()| TagByte)
     }
 }
@@ -456,7 +449,7 @@ impl Display for TypeInfo {
 }
 
 impl Decode for Box<str> {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let len = Index::decode(file)?;
         String::from_utf8(file.read(len.as_usize())?.into())
             .map(String::into_boxed_str)
@@ -544,7 +537,7 @@ pub enum InitMode {
 }
 
 impl Decode for Element {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let flags = file.read_byte()?;
         let mode = match flags {
             0x00 | 0x02 | 0x04 | 0x06 => {
@@ -583,13 +576,13 @@ pub struct FunctionDefinition {
 }
 
 impl<T: Decode, U: Decode> Decode for (T, U) {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         Ok((T::decode(file)?, U::decode(file)?))
     }
 }
 
 impl Decode for FunctionDefinition {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let _ = u32::decode(file)?;
         let count = Index::decode(file)?;
         let mut locals = vec![];
@@ -661,7 +654,7 @@ pub struct Data {
 }
 
 impl Decode for Data {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let mode = match u32::decode(file)? {
             0 => InitMode::Active {
                 index: MemoryIndex::ZERO.0,
@@ -710,16 +703,14 @@ pub struct Limit {
 }
 
 impl Decode for Limit {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let bounded = bool::decode(file)?;
         let min = Index::decode(file)?;
         let max = match bounded {
             true => Index::decode(file)?,
             false => Index::MAX,
         };
-        if max < min {
-            return Err(invalid_data("degenerate limit encountered; max < min"));
-        }
+        ensure!(max >= min, "degenerate limit encountered; max < min");
         Ok(Limit { min, max })
     }
 }
@@ -767,7 +758,6 @@ decodable! {
     }
 }
 
-use crate::invalid_data;
 use crate::runtime::parameter::fmt_ty_vec;
 use crate::runtime::ValueBitsType;
 use crate::vector::{vector_from_vec, Index, WasmVec};
@@ -779,10 +769,10 @@ pub enum WasmVersion {
 }
 
 impl Decode for WasmVersion {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         match u32::from_le_bytes(file.read_chunk()?) {
             1 => Ok(WasmVersion::Version1),
-            _ => Err(invalid_data("unsupported WASM version")),
+            _ => Err(invalid_data("unsupported wasm version")),
         }
     }
 }
@@ -811,7 +801,7 @@ pub struct WasmBinary {
 }
 
 impl WasmBinary {
-    fn decode_no_magic(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode_no_magic(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let version = WasmVersion::decode(file)?;
         let mut custom_sections = vec![];
         let mut sections = WasmSections {
@@ -871,7 +861,7 @@ impl WasmBinary {
 }
 
 impl Decode for WasmBinary {
-    fn decode(file: &mut ReadTape<impl Read>) -> Result<Self> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
         let magic = file.read_chunk()?;
         if magic != *b"\0asm" {
             file.put_chunk(magic);
@@ -888,10 +878,10 @@ impl Decode for WasmBinary {
     }
 }
 
-pub(crate) fn decode(mut reader: ReadTape<impl Read>) -> Result<WasmBinary> {
+pub(crate) fn decode(mut reader: ReadTape<impl Read>) -> anyhow::Result<WasmBinary> {
     WasmBinary::decode(&mut reader)
 }
 
-pub fn parse_module(file: impl Read) -> Result<WasmBinary> {
+pub fn parse_module(file: impl Read) -> anyhow::Result<WasmBinary> {
     decode(ReadTape::new(file))
 }

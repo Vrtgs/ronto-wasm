@@ -1,4 +1,3 @@
-use crate::invalid_data;
 use crate::parser::Decode;
 use crate::read_tape::ReadTape;
 use std::cmp::Ordering;
@@ -17,7 +16,7 @@ use std::ptr::NonNull;
 pub struct Index(pub u32);
 
 pub(crate) fn vector_from_vec<T>(vec: Vec<T>) -> anyhow::Result<WasmVec<T>> {
-    WasmVec::try_from(vec.into_boxed_slice()).map_err(invalid_data)
+    WasmVec::try_from(vec.into_boxed_slice()).map_err(anyhow::Error::new)
 }
 
 impl Decode for Index {

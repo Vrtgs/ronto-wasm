@@ -10,6 +10,10 @@ pub(super) fn push_ast(
     compiler: &mut ActiveCompilation,
 ) -> anyhow::Result<()> {
     for instruction in expression {
+        if compiler.hit_unreachable() && !matches!(instruction, ResolvedInstruction::End) {
+            continue;
+        }
+
         match instruction {
             ResolvedInstruction::StructureCf(StructuredControlFlow {
                                                  start,
