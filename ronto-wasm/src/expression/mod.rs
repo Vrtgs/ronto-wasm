@@ -3,17 +3,26 @@ mod typed_instruction_code;
 
 mod untyped_instruction_code;
 
-use crate::expression::definitions::{ControlFlowInstruction, Instruction, SimpleInstruction, TypedInstruction, UntypedInstruction};
+use crate::expression::definitions::{
+    ControlFlowInstruction, Instruction, SimpleInstruction, TypedInstruction, UntypedInstruction,
+};
 use crate::expression::desugar::LabelType;
 use crate::expression::untyped_instruction_code::UntypedInstructionCode;
-use crate::parser::{DataIndex, Decode, ExternIndex, FunctionDefinition, FunctionIndex, GlobalIndex, GlobalType, LabelIndex, LocalIndex, MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo, ValueType};
+use crate::parser::{
+    DataIndex, Decode, ExternIndex, FunctionDefinition, FunctionIndex, GlobalIndex, GlobalType,
+    LabelIndex, LocalIndex, MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, TypeInfo,
+    ValueType,
+};
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryFault;
 use crate::runtime::parameter::sealed::SealedInput;
-use crate::runtime::{values_len, CompilerFlags, ReferenceValue, Store, Trap, Value, ValueStack, WasmContext, WordStore};
-use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::{runtime, Stack, VirtualMachine};
-use anyhow::{bail, ensure, Context};
+use crate::runtime::{
+    CompilerFlags, ReferenceValue, Store, Trap, Value, ValueStack, WasmContext, WordStore,
+    values_len,
+};
+use crate::vector::{Index, WasmVec, vector_from_vec};
+use crate::{Stack, VirtualMachine, runtime};
+use anyhow::{Context, bail, ensure};
 use std::cmp::PartialEq;
 use std::io::Read;
 
@@ -46,29 +55,29 @@ impl Expression {
         };
 
         Some(match *instruction {
-            SimpleInstruction::Typed(ref typed) => {
-                match *typed {
-                    TypedInstruction::I32Const(val) => Value::I32(val as u32),
-                    TypedInstruction::I64Const(val) => Value::I64(val as u64),
-                    TypedInstruction::F32Const(val) => Value::F32(val),
-                    TypedInstruction::F64Const(val) => Value::F64(val),
-                    TypedInstruction::V128Const(val) => Value::V128(val),
-                    TypedInstruction::RefNull(ReferenceType::Extern) => {
-                        Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
-                    }
-                    TypedInstruction::RefNull(ReferenceType::Function) => {
-                        Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
-                    }
-                    TypedInstruction::RefFunc(func) => Value::Ref(ReferenceValue::Function(func)),
-                    _ => {
-                        debug_assert!(!typed.const_available());
-                        return None;
-                    }
+            SimpleInstruction::Typed(ref typed) => match *typed {
+                TypedInstruction::I32Const(val) => Value::I32(val as u32),
+                TypedInstruction::I64Const(val) => Value::I64(val as u64),
+                TypedInstruction::F32Const(val) => Value::F32(val),
+                TypedInstruction::F64Const(val) => Value::F64(val),
+                TypedInstruction::V128Const(val) => Value::V128(val),
+                TypedInstruction::RefNull(ReferenceType::Extern) => {
+                    Value::Ref(ReferenceValue::Extern(ExternIndex::NULL))
                 }
-            }
+                TypedInstruction::RefNull(ReferenceType::Function) => {
+                    Value::Ref(ReferenceValue::Function(FunctionIndex::NULL))
+                }
+                TypedInstruction::RefFunc(func) => Value::Ref(ReferenceValue::Function(func)),
+                _ => {
+                    debug_assert!(!typed.const_available());
+                    return None;
+                }
+            },
             // TODO: only allow imported globals
-            SimpleInstruction::Untyped(UntypedInstruction::GlobalGet(glob)) => vm.load_global(glob)?,
-            _ => return None
+            SimpleInstruction::Untyped(UntypedInstruction::GlobalGet(glob)) => {
+                vm.load_global(glob)?
+            }
+            _ => return None,
         })
     }
 }
@@ -222,7 +231,6 @@ trait Compile: Sized {
     fn compile(self, compiler: &mut ActiveCompilation) -> anyhow::Result<CompiledInstruction>;
 }
 
-
 impl Compile for IncompleteJump {
     fn compile(self, compiler: &mut ActiveCompilation) -> anyhow::Result<CompiledInstruction> {
         let jump = match self {
@@ -303,7 +311,11 @@ impl Compile for UntypedInstruction {
 
 impl Compile for TypedInstruction {
     fn compile(self, compiler: &mut ActiveCompilation) -> anyhow::Result<CompiledInstruction> {
-        ensure!(self.simulate(compiler), "invalid instruction {}", self.name());
+        ensure!(
+            self.simulate(compiler),
+            "invalid instruction {}",
+            self.name()
+        );
         Ok(CompiledInstruction::Typed(self))
     }
 }
@@ -312,7 +324,7 @@ impl Compile for SimpleInstruction {
     fn compile(self, compiler: &mut ActiveCompilation) -> anyhow::Result<CompiledInstruction> {
         match self {
             SimpleInstruction::Untyped(untyped) => untyped.compile(compiler),
-            SimpleInstruction::Typed(typed) => typed.compile(compiler)
+            SimpleInstruction::Typed(typed) => typed.compile(compiler),
         }
     }
 }
@@ -402,7 +414,10 @@ impl ActiveCompilation<'_, '_> {
         }
 
         self.values_len.0 -= values_len(data)?.0;
-        ensure!(stack.drain(stack.len() - data.len()..).as_slice() == data, "type mismatched");
+        ensure!(
+            stack.drain(stack.len() - data.len()..).as_slice() == data,
+            "type mismatched"
+        );
 
         Ok(())
     }
@@ -459,11 +474,11 @@ impl ActiveCompilation<'_, '_> {
         let label = self.labels.pop().unwrap();
         let valid_label_return = self.hit_unreachable()
             || (Some(self.values.len())
-            == label
-            .type_check_address
-            .as_usize()
-            .checked_add(label.output.len())
-            && self.is_slice_top(&label.output));
+                == label
+                    .type_check_address
+                    .as_usize()
+                    .checked_add(label.output.len())
+                && self.is_slice_top(&label.output));
 
         ensure!(valid_label_return, "invalid label output");
         Ok(label)
@@ -475,34 +490,42 @@ impl ActiveCompilation<'_, '_> {
         Ok(())
     }
 
-
     fn compile(mut self) -> anyhow::Result<WasmFunction> {
         if !self.hit_unreachable() {
             self.pop_slice(self.expected_output)?;
-            ensure!(self.values.is_empty(), "too many values on the stack before function return");
+            ensure!(
+                self.values.is_empty(),
+                "too many values on the stack before function return"
+            );
         }
 
         optimize_instructions::optimize(&mut self);
-        let instructions = vector_from_vec(std::mem::take(&mut self.instructions))
-            .context("function too long")?;
+        let instructions =
+            vector_from_vec(std::mem::take(&mut self.instructions)).context("function too long")?;
 
-        let type_id = self.context.function_signatures.get(self.function_index.0).unwrap();
+        let type_id = self
+            .context
+            .function_signatures
+            .get(self.function_index.0)
+            .unwrap();
         let r#type = self.context.types.get(type_id.0).unwrap();
         let parameters_len = values_len(&r#type.parameters)?;
 
         let mut locals = ValueStack::new();
 
-        self.locals.iter().for_each(|&(ty, _)| {
-            match Value::new(ty) {
+        self.locals
+            .iter()
+            .for_each(|&(ty, _)| match Value::new(ty) {
                 Value::I32(val) => val.push_words(&mut locals.0),
                 Value::I64(val) => val.push_words(&mut locals.0),
                 Value::F32(val) => val.push_words(&mut locals.0),
                 Value::F64(val) => val.push_words(&mut locals.0),
                 Value::V128(val) => val.push_words(&mut locals.0),
                 Value::Ref(ReferenceValue::Function(func)) => func.push_words(&mut locals.0),
-                Value::Ref(ReferenceValue::Extern(extern_idx)) => extern_idx.push_words(&mut locals.0),
-            }
-        });
+                Value::Ref(ReferenceValue::Extern(extern_idx)) => {
+                    extern_idx.push_words(&mut locals.0)
+                }
+            });
 
         Ok(WasmFunction {
             parameters_len,
@@ -519,10 +542,7 @@ impl<'a> WasmCompilationContext<'a> {
         (function, index): (FunctionDefinition, FunctionIndex),
         ty: TypeIndex,
     ) -> anyhow::Result<(Expression, ActiveCompilation<'_, 'a>)> {
-        let function_signature = self
-            .types
-            .get(ty.0)
-            .context("invalid type index")?;
+        let function_signature = self.types.get(ty.0).context("invalid type index")?;
 
         let locals = WasmVec::try_from(
             function_signature
@@ -532,7 +552,7 @@ impl<'a> WasmCompilationContext<'a> {
                 .chain(function.locals)
                 .collect::<Box<[_]>>(),
         )
-            .context("too many parameters and locals in function")?;
+        .context("too many parameters and locals in function")?;
 
         Ok((
             function.body,
@@ -543,11 +563,14 @@ impl<'a> WasmCompilationContext<'a> {
                 expected_output: &function_signature.result,
                 instructions: vec![],
                 locals: WasmVec::from_trusted_box(
-                    locals.iter().scan(0, |state, new| {
-                        let prev = *state;
-                        *state += new.word_size();
-                        Some((*new, LocalIndex(Index(prev))))
-                    }).collect::<Box<[_]>>()
+                    locals
+                        .iter()
+                        .scan(0, |state, new| {
+                            let prev = *state;
+                            *state += new.word_size();
+                            Some((*new, LocalIndex(Index(prev))))
+                        })
+                        .collect::<Box<[_]>>(),
                 ),
                 values: vec![],
                 values_len: Index(0),
@@ -567,8 +590,8 @@ impl<'a> WasmCompilationContext<'a> {
 
 mod desugar;
 mod label_resolution;
-mod push_ast;
 mod optimize_instructions;
+mod push_ast;
 
 impl WasmFunction {
     pub fn new(
@@ -586,11 +609,15 @@ impl WasmFunction {
         active_compilation.compile()
     }
 
-    pub(crate) fn eval(&self, virtual_machine: &VirtualMachine, stack: &mut ValueStack, call_depth: usize) -> ExecutionResult {
+    pub(crate) fn eval(
+        &self,
+        virtual_machine: &VirtualMachine,
+        stack: &mut ValueStack,
+        call_depth: usize,
+    ) -> ExecutionResult {
         let new_stack_len = stack.len() - self.parameters_len.as_usize();
-        let mut locals = Vec::with_capacity(
-            self.parameters_len.as_usize() + self.pre_compiled_locals.len()
-        );
+        let mut locals =
+            Vec::with_capacity(self.parameters_len.as_usize() + self.pre_compiled_locals.len());
         locals.extend_from_slice(&stack.0[new_stack_len..]);
         locals.extend_from_slice(&self.pre_compiled_locals);
         stack.0.truncate(new_stack_len);
@@ -611,7 +638,6 @@ impl WasmFunction {
                 continue;
             }};
         }
-
 
         while let Some(instruction) = self.instructions.get(ip) {
             // if !cfg!(test) {
@@ -703,7 +729,11 @@ impl Decode for Expression {
             instructions.push(instruction);
         }
 
-        ensure!(control_flow.is_empty(), "unescaped control flow: {:?}",control_flow);
+        ensure!(
+            control_flow.is_empty(),
+            "unescaped control flow: {:?}",
+            control_flow
+        );
 
         Ok(Self {
             instructions: vector_from_vec(instructions)?,

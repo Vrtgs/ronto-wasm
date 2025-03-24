@@ -1,19 +1,21 @@
+use crate::Stack;
 use crate::expression::WasmFunction;
 use crate::parser::{
     DataIndex, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, LocalIndex,
     MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, ValueType,
 };
-use crate::runtime::memory_buffer::{MemoryArgument, MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
+use crate::runtime::memory_buffer::{
+    MemoryArgument, MemoryBuffer, MemoryError, MemoryFault, OutOfMemory,
+};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::vector::{Index, WasmVec};
-use crate::Stack;
-use anyhow::{ensure, Context};
+use anyhow::{Context, ensure};
 use bytemuck::{Pod, Zeroable};
 use crossbeam::atomic::AtomicCell;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub mod trap;
@@ -27,7 +29,6 @@ pub mod store;
 
 use crate::runtime::linker::{Import, NativeFunction};
 pub use {linker::Linker, store::Store, trap::Trap};
-
 
 #[derive(Debug, Copy, Clone)]
 pub enum ReferenceValue {
@@ -136,7 +137,7 @@ pub(crate) trait ValueInner: WordStore {
 
 pub(crate) trait WordStore: WordAligned + Send + Sync + Debug {
     fn from_words(data: &mut Vec<Word>) -> Option<Self>;
-    fn to_words(self) -> impl IntoIterator<Item=Word>;
+    fn to_words(self) -> impl IntoIterator<Item = Word>;
     fn push_words(self, data: &mut Vec<Word>) {
         data.extend(self.to_words())
     }
@@ -156,7 +157,19 @@ macro_rules! impl_word_aligned {
     )*};
 }
 
-impl_word_aligned!(Index, FunctionIndex, ExternIndex, i32, u32, f32, i64, u64, f64, i128, u128);
+impl_word_aligned!(
+    Index,
+    FunctionIndex,
+    ExternIndex,
+    i32,
+    u32,
+    f32,
+    i64,
+    u64,
+    f64,
+    i128,
+    u128
+);
 
 macro_rules! impl_numeric_value {
     ($($variant: ident => $ty:ty $(; $sty: ty)?),+ $(,)?) => {$(
@@ -329,7 +342,7 @@ impl WordStore for Index {
         u32::from_words(data).map(Self)
     }
 
-    fn to_words(self) -> impl IntoIterator<Item=Word> {
+    fn to_words(self) -> impl IntoIterator<Item = Word> {
         u32::to_words(self.0)
     }
 
@@ -563,7 +576,6 @@ impl Default for CompilerFlags {
     }
 }
 
-
 #[derive(Default, Clone)]
 pub struct VirtualMachineOptionsBuilder {
     options: VirtualMachineOptions,
@@ -602,10 +614,11 @@ type Constructor = Box<dyn FnOnce(&mut Store) -> anyhow::Result<()>>;
 
 fn validate_vm(vm: &VirtualMachine) -> anyhow::Result<()> {
     ensure!(
-        vm.store.start.is_none_or(|func| vm.get_typed_function::<(), ()>(func).is_ok()),
+        vm.store
+            .start
+            .is_none_or(|func| vm.get_typed_function::<(), ()>(func).is_ok()),
         "invalid start function index"
     );
-
 
     for (export_name, &desc) in vm.store.exports.iter() {
         let is_valid = match desc {
@@ -872,9 +885,7 @@ impl ValueStack {
 pub(crate) fn values_len(values: &[ValueType]) -> anyhow::Result<Index> {
     values
         .iter()
-        .try_fold(0_u32, |size, ty| {
-            size.checked_add(ty.word_size())
-        })
+        .try_fold(0_u32, |size, ty| size.checked_add(ty.word_size()))
         .map(Index)
         .context("too many arguments")
 }
@@ -905,7 +916,10 @@ impl<'a> WasmContext<'a> {
         self.virtual_machine.store.functions.get(function.0)
     }
 
-    pub(crate) fn get_local<T: ValueInner>(&mut self, local: LocalIndex) -> Option<&mut WordAlign<T>> {
+    pub(crate) fn get_local<T: ValueInner>(
+        &mut self,
+        local: LocalIndex,
+    ) -> Option<&mut WordAlign<T>> {
         T::get_mut(local, &mut self.locals)
     }
 

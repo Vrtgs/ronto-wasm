@@ -12,7 +12,8 @@ use thiserror::Error;
 #[error("namespace collision during linker creation")]
 pub struct NameSpaceCollision(());
 
-pub(super) type NativeFunction = dyn Fn(&VirtualMachine, &mut ValueStack) -> Result<(), Trap> + Send + Sync;
+pub(super) type NativeFunction =
+    dyn Fn(&VirtualMachine, &mut ValueStack) -> Result<(), Trap> + Send + Sync;
 
 pub(super) type SubTypeCheck = fn(&[ValueType]) -> bool;
 
@@ -66,7 +67,7 @@ impl<T: 'static + Send + Sync> ModuleImportsBuilder<T> {
                 let output = fun(&data, mem, input);
                 output.map(|output| Out::push(output, stack))
             }))
-                .map_err(|_| Trap::new())?
+            .map_err(|_| Trap::new())?
         });
 
         let signature = NativeFunctionSignature {
@@ -118,7 +119,7 @@ impl Linker {
     }
 
     pub fn from_modules<S: Into<Arc<str>>>(
-        iter: impl IntoIterator<Item=(S, ModuleImports)>,
+        iter: impl IntoIterator<Item = (S, ModuleImports)>,
     ) -> Result<Self, NameSpaceCollision> {
         iter.into_iter()
             .try_fold(Linker::new(), |mut linker, (str, module)| {

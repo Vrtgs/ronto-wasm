@@ -411,7 +411,11 @@ impl<T: Decode> Decode for WithLength<T> {
         let buffer = file.read(length)?.into_vec();
         let mut tape = ReadTape::memory_buffer(buffer);
         let ret = T::decode(&mut tape)?;
-        ensure!(!tape.has_data()?, "`{}` has more data than was decoded", type_name::<T>());
+        ensure!(
+            !tape.has_data()?,
+            "`{}` has more data than was decoded",
+            type_name::<T>()
+        );
 
         Ok(Self(ret))
     }
@@ -752,9 +756,9 @@ decodable! {
     struct DataCountSection(u32);
 }
 
-use crate::runtime::parameter::fmt_ty_vec;
 use crate::runtime::ValueBitsType;
-use crate::vector::{vector_from_vec, Index, WasmVec};
+use crate::runtime::parameter::fmt_ty_vec;
+use crate::vector::{Index, WasmVec, vector_from_vec};
 
 #[derive(Debug)]
 #[non_exhaustive]

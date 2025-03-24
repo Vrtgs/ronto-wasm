@@ -1,7 +1,7 @@
+use crate::Index;
 use crate::runtime::linker::{ModuleImportsBuilder, NameSpaceCollision};
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::runtime::{Linker, Trap};
-use crate::Index;
 use bytemuck::{Pod, Zeroable};
 use std::convert::Infallible;
 use std::io::{IoSlice, Write};
@@ -68,8 +68,7 @@ pub fn fd_write(
         _ => return WASI_EFAULT,
     };
 
-    mem
-        .store(ptr_written, &(written as u32))
+    mem.store(ptr_written, &(written as u32))
         .map_or(WASI_EFAULT, |()| WASI_ESUCCESS)
 }
 
@@ -129,9 +128,15 @@ pub fn add_to_linker(linker: &mut Linker) -> Result<(), NameSpaceCollision> {
         environ_sizes_get,
     ]);
 
-    module_builder = module_builder.function("proc_exit", |(), _, exit_code: i32| {
-        Err::<Infallible, _>(Trap::custom(Exit(exit_code)))
-    }).expect("no way for this to fail, no other module exists with the name proc_exit currently");
+    module_builder = module_builder
+        .function("proc_exit", |(), _, exit_code: i32| {
+            Err::<Infallible, _>(Trap::custom(Exit(exit_code)))
+        })
+        .expect(
+            "no way for this to fail, no other module exists with the name proc_exit currently",
+        );
 
-    linker.add_module("wasi_snapshot_preview1", module_builder.build()).map(drop)
+    linker
+        .add_module("wasi_snapshot_preview1", module_builder.build())
+        .map(drop)
 }

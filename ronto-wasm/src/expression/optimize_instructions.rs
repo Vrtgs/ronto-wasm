@@ -1,6 +1,6 @@
+use crate::Index;
 use crate::expression::definitions::TypedInstruction;
 use crate::expression::{ActiveCompilation, CompiledInstruction, JumpType};
-use crate::Index;
 use std::iter;
 
 fn optimize_nop(compiler: &mut ActiveCompilation) {
@@ -10,8 +10,10 @@ fn optimize_nop(compiler: &mut ActiveCompilation) {
             instruction,
             CompiledInstruction::Typed(
                 TypedInstruction::Nop
-                | TypedInstruction::F32ReinterpretI32 | TypedInstruction::I32ReinterpretF32
-                | TypedInstruction::F64ReinterpretI64 | TypedInstruction::I64ReinterpretF64
+                    | TypedInstruction::F32ReinterpretI32
+                    | TypedInstruction::I32ReinterpretF32
+                    | TypedInstruction::F64ReinterpretI64
+                    | TypedInstruction::I64ReinterpretF64
             )
         )
     };
@@ -40,10 +42,12 @@ fn optimize_nop(compiler: &mut ActiveCompilation) {
         if let CompiledInstruction::Jump(jmp) = instr {
             match jmp {
                 JumpType::Jump(jmp) | JumpType::JumpIf(jmp) => apply_offset(&mut jmp.goto),
-                JumpType::JumpTable { table, fallback, .. } => {
-                    table.iter_mut().chain(iter::once(fallback))
-                        .for_each(|jmp| apply_offset(&mut jmp.goto))
-                }
+                JumpType::JumpTable {
+                    table, fallback, ..
+                } => table
+                    .iter_mut()
+                    .chain(iter::once(fallback))
+                    .for_each(|jmp| apply_offset(&mut jmp.goto)),
             }
         }
 

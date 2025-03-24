@@ -1,3 +1,4 @@
+use crate::Index;
 use crate::expression::{Expression, WasmCompilationContext};
 use crate::parser::InitMode;
 use crate::parser::{
@@ -5,10 +6,12 @@ use crate::parser::{
     WasmBinary,
 };
 use crate::runtime::memory_buffer::MemoryBuffer;
-use crate::runtime::{Body, CompilerFlags, Constructor, FunctionInner, GlobalValueInner, Import, Linker, ReferenceValue, Table, Value, ValueInner, WasmFunction};
-use crate::vector::{vector_from_vec, WasmVec};
-use crate::Index;
-use anyhow::{anyhow, bail, ensure, Context};
+use crate::runtime::{
+    Body, CompilerFlags, Constructor, FunctionInner, GlobalValueInner, Import, Linker,
+    ReferenceValue, Table, Value, ValueInner, WasmFunction,
+};
+use crate::vector::{WasmVec, vector_from_vec};
+use anyhow::{Context, anyhow, bail, ensure};
 use std::collections::HashMap;
 
 pub struct Store {
@@ -40,17 +43,17 @@ impl Store {
     #[allow(clippy::too_many_arguments)]
     fn create(
         types: WasmVec<TypeInfo>,
-        functions: impl IntoIterator<Item=FunctionInner>,
-        tables: impl IntoIterator<Item=Table>,
-        memory: impl IntoIterator<Item=MemoryBuffer>,
+        functions: impl IntoIterator<Item = FunctionInner>,
+        tables: impl IntoIterator<Item = Table>,
+        memory: impl IntoIterator<Item = MemoryBuffer>,
         exports: HashMap<Box<str>, ExportDescription>,
-        global_stubs: impl IntoIterator<Item=GlobalValueInner>,
-        data: impl IntoIterator<Item=Data>,
+        global_stubs: impl IntoIterator<Item = GlobalValueInner>,
+        data: impl IntoIterator<Item = Data>,
         start: Option<FunctionIndex>,
-        element: impl IntoIterator<Item=Element>,
-        constructors: impl IntoIterator<Item=Constructor>,
+        element: impl IntoIterator<Item = Element>,
+        constructors: impl IntoIterator<Item = Constructor>,
     ) -> anyhow::Result<Self> {
-        fn collect_wasm_vec<T>(it: impl IntoIterator<Item=T>) -> anyhow::Result<WasmVec<T>> {
+        fn collect_wasm_vec<T>(it: impl IntoIterator<Item = T>) -> anyhow::Result<WasmVec<T>> {
             WasmVec::try_from(it.into_iter().collect::<Box<[_]>>())
                 .context("too many functions in store")
         }
@@ -76,7 +79,11 @@ impl Store {
         Ok(this)
     }
 
-    pub fn with_linker_and_options(binary: WasmBinary, options: CompilerFlags, linker: &Linker) -> anyhow::Result<Self> {
+    pub fn with_linker_and_options(
+        binary: WasmBinary,
+        options: CompilerFlags,
+        linker: &Linker,
+    ) -> anyhow::Result<Self> {
         let sections = binary.sections;
 
         let types = sections.r#type.map(|sec| sec.functions).unwrap_or_default();
@@ -86,7 +93,10 @@ impl Store {
             .map(|fun| fun.signatures)
             .unwrap_or_default();
         let wasm_defined_functions = sections.code.map(|fun| fun.definitions).unwrap_or_default();
-        ensure!(wasm_function_types.len() == wasm_defined_functions.len(), "mismatched function signatures and functions");
+        ensure!(
+            wasm_function_types.len() == wasm_defined_functions.len(),
+            "mismatched function signatures and functions"
+        );
 
         let import_stubs = sections.import.map(|fun| fun.imports).unwrap_or_default();
 
@@ -94,26 +104,23 @@ impl Store {
             .into_iter()
             .map(|imp| {
                 let import = linker.get(&imp.module, &imp.name).with_context(|| {
-                    format!(
-                        "unresolved import [{}]::[{}]",
-                        imp.module, imp.name
-                    )
+                    format!("unresolved import [{}]::[{}]", imp.module, imp.name)
                 })?;
 
                 Ok(match (imp.description, import.clone()) {
                     (ImportDescription::Function(r#type), Import::Function(body, signature)) => {
-                        let import_type = types
-                            .get(r#type.0)
-                            .context("invalid import type index")?;
+                        let import_type =
+                            types.get(r#type.0).context("invalid import type index")?;
 
                         let type_checks = (signature.input_check)(&import_type.parameters)
                             && (signature.output_check)(&import_type.result);
 
-                        ensure!(type_checks,
+                        ensure!(
+                            type_checks,
                             "invalid function [{}]::[{}] signature, expected {import_type}",
-                                imp.module, imp.name
+                            imp.module,
+                            imp.name
                         );
-
 
                         let func = FunctionInner {
                             r#type,
@@ -163,8 +170,16 @@ impl Store {
 
         let mut compiler = WasmCompilationContext {
             globals: &globals_signatures,
-            mem_count: sections.memory.as_ref().map(|mem| mem.memories.len_idx()).unwrap_or(Index(0)),
-            data_count: sections.data.as_ref().map(|mem| mem.data.len_idx()).unwrap_or(Index(0)),
+            mem_count: sections
+                .memory
+                .as_ref()
+                .map(|mem| mem.memories.len_idx())
+                .unwrap_or(Index(0)),
+            data_count: sections
+                .data
+                .as_ref()
+                .map(|mem| mem.data.len_idx())
+                .unwrap_or(Index(0)),
             function_signatures: &function_signatures,
             types: &types,
             tables,
@@ -185,7 +200,12 @@ impl Store {
                     .map(|((def, r#type), function_index)| {
                         Ok(FunctionInner {
                             r#type,
-                            body: Body::WasmDefined(WasmFunction::new(&options, (def, function_index), r#type, &mut compiler)?),
+                            body: Body::WasmDefined(WasmFunction::new(
+                                &options,
+                                (def, function_index),
+                                r#type,
+                                &mut compiler,
+                            )?),
                         })
                     }),
             );
@@ -214,9 +234,9 @@ impl Store {
                     .const_eval(this)
                     .context("global constructor not available in const")
                     .and_then(|new_value| {
-                        (*this.globals)[i].store_mut(new_value).map_err(|()| {
-                            anyhow!("Global initialization failed, invalid return")
-                        })
+                        (*this.globals)[i]
+                            .store_mut(new_value)
+                            .map_err(|()| anyhow!("Global initialization failed, invalid return"))
                     })?
             }
 
@@ -227,10 +247,7 @@ impl Store {
             offset
                 .const_eval(this)
                 .context("active element offset not available in const")
-                .and_then(|val| {
-                    <Index as ValueInner>::from(val)
-                        .context("invalid offset type")
-                })
+                .and_then(|val| <Index as ValueInner>::from(val).context("invalid offset type"))
         };
 
         macro_rules! init_active_segment {
@@ -259,7 +276,8 @@ impl Store {
                     .get(memory_index)
                     .context("invalid memory index offset")?;
 
-                buff.init(offset, &data.init).context("invalid memory operation performed by active segment")?;
+                buff.init(offset, &data.init)
+                    .context("invalid memory operation performed by active segment")?;
             })
         };
 

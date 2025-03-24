@@ -1,9 +1,11 @@
-use crate::expression::definitions::{BlockType, ControlFlowInstruction, Instruction, SimpleInstruction, TypedInstruction};
+use crate::Index;
+use crate::expression::definitions::{
+    BlockType, ControlFlowInstruction, Instruction, SimpleInstruction, TypedInstruction,
+};
 use crate::expression::{ActiveCompilation, Expression};
 use crate::parser::{LabelIndex, ValueType};
-use crate::vector::{vector_from_vec, WasmVec};
-use crate::Index;
-use anyhow::{ensure, Context};
+use crate::vector::{WasmVec, vector_from_vec};
+use anyhow::{Context, ensure};
 use std::iter;
 
 #[derive(Debug, Copy, Clone)]
@@ -19,7 +21,6 @@ pub(crate) enum UnresolvedJump {
     BranchTable(WasmVec<LabelIndex>, LabelIndex),
     Return,
 }
-
 
 pub(crate) enum TypeVec<'a> {
     Empty,
@@ -80,7 +81,9 @@ impl<'a> IncompleteCf<'a> {
                 );
                 instructions.extend([
                     DesugaredInstruction::Label(LabelType::Block, IF_BLOCK_TYPE),
-                    DesugaredInstruction::Simple(SimpleInstruction::Typed(TypedInstruction::I32EqZ)),
+                    DesugaredInstruction::Simple(SimpleInstruction::Typed(
+                        TypedInstruction::I32EqZ,
+                    )),
                     DesugaredInstruction::JumpCf(UnresolvedJump::BranchIf(LabelIndex::ZERO)),
                 ]);
                 instructions.extend(self.instructions);
@@ -101,15 +104,19 @@ impl<'a> IncompleteCf<'a> {
                 let mut if_not = self.instructions;
 
                 let inc = |idx: &mut LabelIndex| {
-                    idx.0.0.checked_add(1).context("instructions too nested")
+                    idx.0
+                        .0
+                        .checked_add(1)
+                        .context("instructions too nested")
                         .map(|new_idx| idx.0.0 = new_idx)
                 };
 
                 for instr in &mut if_not {
                     if let DesugaredInstruction::JumpCf(jmp) = instr {
                         match jmp {
-                            UnresolvedJump::Branch(idx)
-                            | UnresolvedJump::BranchIf(idx) => inc(idx)?,
+                            UnresolvedJump::Branch(idx) | UnresolvedJump::BranchIf(idx) => {
+                                inc(idx)?
+                            }
                             UnresolvedJump::BranchTable(idxs, idx) => {
                                 idxs.iter_mut().chain(iter::once(idx)).try_for_each(inc)?
                             }
@@ -123,7 +130,9 @@ impl<'a> IncompleteCf<'a> {
                 let input = match input {
                     [] => TypeVec::Single(ValueType::I32),
                     _ => {
-                        let vec = input.iter().copied()
+                        let vec = input
+                            .iter()
+                            .copied()
                             .chain(iter::once(ValueType::I32))
                             .collect::<Vec<_>>();
                         TypeVec::Owned(vector_from_vec(vec)?)
@@ -215,16 +224,18 @@ pub(crate) fn desugar<'env>(
                 ControlFlowInstruction::If(bt) => push_cf!(If(bt)),
                 ControlFlowInstruction::Else => {
                     let Some(IncompleteCf {
-                                 ty: cf_ty @ IncompleteCfType::If,
-                                 instructions: if_block,
-                                 ..
-                             }) = control_flow.last_mut()
+                        ty: cf_ty @ IncompleteCfType::If,
+                        instructions: if_block,
+                        ..
+                    }) = control_flow.last_mut()
                     else {
                         unreachable!(
                             "there has to be an if as the last control flow, otherwise the expression would fail to decode; this is a bug"
                         )
                     };
-                    *cf_ty = IncompleteCfType::IfElse { if_block: std::mem::take(if_block) };
+                    *cf_ty = IncompleteCfType::IfElse {
+                        if_block: std::mem::take(if_block),
+                    };
                 }
                 ControlFlowInstruction::End => {
                     let cf = control_flow.pop()
@@ -242,7 +253,10 @@ pub(crate) fn desugar<'env>(
         }
     }
 
-    assert!(control_flow.is_empty(), "unbalanced control flow; this is a bug");
+    assert!(
+        control_flow.is_empty(),
+        "unbalanced control flow; this is a bug"
+    );
 
     Ok(underlying_instructions)
 }

@@ -41,16 +41,17 @@ impl<T> Stack<T> for Vec<T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::parse_module;
     use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-    use crate::runtime::{wasi_snapshot_preview1, CallError, GetFunctionError, Linker, Store, VirtualMachine};
+    use crate::runtime::{
+        CallError, GetFunctionError, Linker, Store, VirtualMachine, wasi_snapshot_preview1,
+    };
     use crate::vector::Index;
     use anyhow::bail;
-    use base64::prelude::BASE64_STANDARD;
     use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use bytemuck::{Pod, Zeroable};
     use image::GenericImageView;
     use std::ffi::OsStr;
@@ -72,10 +73,7 @@ mod tests {
         wasi_snapshot_preview1::add_to_linker(&mut linker)
             .expect("new linker made, impossible to have namespace collision already");
 
-        let store = Store::with_linker(
-            parse_module(File::open(prefix.join(path))?)?,
-            &linker,
-        )?;
+        let store = Store::with_linker(parse_module(File::open(prefix.join(path))?)?, &linker)?;
         VirtualMachine::new(store)
     }
 
@@ -113,7 +111,7 @@ mod tests {
             ('7' as u32, '8' as u32),
             78_u32,
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
@@ -124,14 +122,14 @@ mod tests {
             (7_u32, 8_u32),
             7_u32,
         )
-            .unwrap();
+        .unwrap();
         test(
             "test_double_arguments.wast",
             "second_arg",
             (7_u32, 8_u32),
             8_u32,
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
@@ -144,14 +142,14 @@ mod tests {
             (0x123456789ABCDEF0_u64, 16_u64),
             0x56789ABCDEF01234_u64,
         )
-            .unwrap();
+        .unwrap();
         test(
             "rot.wast",
             "rotr64",
             (0x123456789ABCDEF0_u64, 16_u64),
             0xDEF0123456789ABC_u64,
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
@@ -162,28 +160,28 @@ mod tests {
             (7_i64, 8_i64, 1_i32),
             7_i64,
         )
-            .unwrap();
+        .unwrap();
         test(
             "select_t.wast",
             "implicit_select",
             (7_i64, 8_i64, 0_i32),
             8_i64,
         )
-            .unwrap();
+        .unwrap();
         test(
             "select_t.wast",
             "explicit_select",
             (9.11_f64, 69.0_f64, 1_i32),
             9.11_f64,
         )
-            .unwrap();
+        .unwrap();
         test(
             "select_t.wast",
             "explicit_select",
             (9.11_f64, 69.0_f64, 0_i32),
             69.0_f64,
         )
-            .unwrap()
+        .unwrap()
     }
 
     #[test]

@@ -1,17 +1,17 @@
 use super::typed_instruction_code::{
-    access_type, AccessType, Call, CastingMemoryAccess, MemoryAccess, MemoryInit, Primitive,
-    RefNull, TypedInstructionCode,
+    AccessType, Call, CastingMemoryAccess, MemoryAccess, MemoryInit, Primitive, RefNull,
+    TypedInstructionCode, access_type,
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::parser::{
-    DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex,
-    MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
+    DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryIndex,
+    ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
 };
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryError;
-use crate::runtime::{memory_buffer, Trap, WasmContext};
+use crate::runtime::{Trap, WasmContext, memory_buffer};
 use crate::vector::{Index, WasmVec};
-use anyhow::{bail, ensure, Context};
+use anyhow::{Context, bail, ensure};
 use std::convert::Infallible;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -675,7 +675,7 @@ macro_rules! impl_bits {
             impl PrimitiveInt for [<u $ty>] {
                 const BITS: Index = Index($ty);
             }
-            
+
             type [<MemoryArgument $ty>] = MemoryArgument<[<u $ty>]>;
         )*}
     };
@@ -723,7 +723,6 @@ impl<B> memory_buffer::MemoryArgument for MemoryArgument<B> {
         1
     }
 }
-
 
 instruction! {
     ControlFlow {

@@ -79,7 +79,7 @@ macro_rules! access {
             .checked_add($addr.0)
             .map(Index)
             .ok_or_else(MemoryFault::new)?;
-        
+
         $(let end  = addr.as_usize().checked_add($size).ok_or_else(MemoryFault::new)?;)?
 
         let range = addr.as_usize()..$({
@@ -270,7 +270,11 @@ impl MemoryBuffer {
         let buffer = &mut **self.buffer.borrow_mut();
 
         let src_start = src;
-        let src_end = src.0.checked_add(n.0).map(Index).ok_or_else(MemoryFault::new)?;
+        let src_end = src
+            .0
+            .checked_add(n.0)
+            .map(Index)
+            .ok_or_else(MemoryFault::new)?;
 
         if src_end.as_usize() > buffer.len() || dest.as_usize() > buffer.len() - n.as_usize() {
             return Err(MemoryFault::new());

@@ -1,7 +1,7 @@
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::parser::{
-    DataIndex, ExternIndex, FunctionIndex, MemoryIndex,
-    ReferenceType, TableIndex, TagByte, TypeIndex,
+    DataIndex, ExternIndex, FunctionIndex, MemoryIndex, ReferenceType, TableIndex, TagByte,
+    TypeIndex,
 };
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
@@ -58,7 +58,7 @@ impl<Data, In, Out, F: Fn(Data, In) -> ExecutionResult<Out>> Primitive<Data, In,
 }
 
 impl<Data, In, Out, F: Fn(Data, In, &mut WasmContext) -> ExecutionResult<Out>>
-Primitive<Data, In, Out, F>
+    Primitive<Data, In, Out, F>
 {
     pub(super) const fn full(f: F) -> Self {
         Self {
@@ -109,8 +109,8 @@ impl TypedInstructionCode<(&TypeIndex, &TableIndex)> for Call {
     ) -> bool {
         Index::get_from_compiler(comp)
             && comp
-            .get_table(table)
-            .is_some_and(|table| table.reftype == ReferenceType::Function)
+                .get_table(table)
+                .is_some_and(|table| table.reftype == ReferenceType::Function)
             && comp.simulate_call_indirect(ty)
     }
 
@@ -156,11 +156,11 @@ macro_rules! access_type {
     };
 }
 
-
-
 pub(super) struct MemoryAccess<T, const A: usize>(pub PhantomData<[T; A]>);
 
-impl<B, T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument<B>> for MemoryAccess<T, A> {
+impl<B, T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument<B>>
+    for MemoryAccess<T, A>
+{
     fn validate(self, &_: &MemoryArgument<B>, compiler: &mut ActiveCompilation) -> bool {
         match access_type!(@fetch A) {
             AccessType::Get => {
@@ -237,7 +237,7 @@ impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
 impl<B, T: ValueInner, E: Extend<T>, const A: usize> TypedInstructionCode<&MemoryArgument<B>>
-for CastingMemoryAccess<T, E, A>
+    for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
     fn validate(self, mem_arg: &MemoryArgument<B>, compiler: &mut ActiveCompilation) -> bool {
@@ -265,7 +265,11 @@ for CastingMemoryAccess<T, E, A>
 pub(super) struct MemoryInit;
 
 impl TypedInstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
-    fn validate(self, (&data, _): (&DataIndex, &TagByte<0x00>), comp: &mut ActiveCompilation) -> bool {
+    fn validate(
+        self,
+        (&data, _): (&DataIndex, &TagByte<0x00>),
+        comp: &mut ActiveCompilation,
+    ) -> bool {
         comp.has_memory(MemoryIndex::ZERO)
             && comp.has_data(data)
             && <(Index, Index, Index)>::get_from_compiler(comp)
@@ -283,5 +287,5 @@ impl TypedInstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
     }
 }
 
-pub(super) use access_type;
 use crate::expression::definitions::MemoryArgument;
+pub(super) use access_type;

@@ -1,6 +1,8 @@
-use crate::expression::definitions::SimpleInstruction;
-use crate::expression::desugar::{CompiledBlockType, DesugaredInstruction, LabelType, UnresolvedJump};
 use crate::expression::ActiveCompilation;
+use crate::expression::definitions::SimpleInstruction;
+use crate::expression::desugar::{
+    CompiledBlockType, DesugaredInstruction, LabelType, UnresolvedJump,
+};
 use crate::vector::Index;
 use anyhow::bail;
 
@@ -76,7 +78,9 @@ pub(crate) fn resolve<'env>(
                     start: get_i!(),
                     ty,
                 };
-                instructions.push(IncompleteResolveInstruction::StructureCf(ControlFlow::Incomplete));
+                instructions.push(IncompleteResolveInstruction::StructureCf(
+                    ControlFlow::Incomplete,
+                ));
                 control_flow.push(cf);
             }
             DesugaredInstruction::EndCf => {
@@ -92,9 +96,7 @@ pub(crate) fn resolve<'env>(
                     label_type: cf.ty,
                 };
                 *instructions.get_mut(cf.start.as_usize()).unwrap() =
-                    IncompleteResolveInstruction::StructureCf(ControlFlow::Complete(
-                        complete_cf,
-                    ));
+                    IncompleteResolveInstruction::StructureCf(ControlFlow::Complete(complete_cf));
                 instructions.push(IncompleteResolveInstruction::EndCf)
             }
             DesugaredInstruction::JumpCf(jmp) => {
@@ -106,5 +108,8 @@ pub(crate) fn resolve<'env>(
         }
     }
 
-    Ok(instructions.into_iter().map(IncompleteResolveInstruction::complete).collect())
+    Ok(instructions
+        .into_iter()
+        .map(IncompleteResolveInstruction::complete)
+        .collect())
 }

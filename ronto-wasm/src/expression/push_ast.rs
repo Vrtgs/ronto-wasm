@@ -10,17 +10,19 @@ pub(super) fn push_ast(
     compiler: &mut ActiveCompilation,
 ) -> anyhow::Result<()> {
     for instruction in expression {
-        if compiler.flags.dead_code_elimination && (compiler.hit_unreachable() && !matches!(instruction, ResolvedInstruction::End)) {
+        if compiler.flags.dead_code_elimination
+            && (compiler.hit_unreachable() && !matches!(instruction, ResolvedInstruction::End))
+        {
             continue;
         }
 
         match instruction {
             ResolvedInstruction::StructureCf(StructuredControlFlow {
-                                                 start,
-                                                 end,
-                                                 block_type,
-                                                 label_type
-                                             }) => {
+                start,
+                end,
+                block_type,
+                label_type,
+            }) => {
                 let goto = match label_type {
                     LabelType::Loop => start,
                     LabelType::Block => end,
@@ -29,13 +31,11 @@ pub(super) fn push_ast(
                 // add nop to slide on
                 compiler.add_instruction(TypedInstruction::Nop)?;
 
-                let into_vec = |type_info| {
-                    match type_info {
-                        TypeVec::Empty => const { WasmVec::new() }
-                        TypeVec::Single(val) => WasmVec::from_trusted_box(Box::new([val])),
-                        TypeVec::Borrowed(borrowed) => WasmVec::from_trusted_box(borrowed.into()),
-                        TypeVec::Owned(vec) => vec,
-                    }
+                let into_vec = |type_info| match type_info {
+                    TypeVec::Empty => const { WasmVec::new() },
+                    TypeVec::Single(val) => WasmVec::from_trusted_box(Box::new([val])),
+                    TypeVec::Borrowed(borrowed) => WasmVec::from_trusted_box(borrowed.into()),
+                    TypeVec::Owned(vec) => vec,
                 };
 
                 let input = into_vec(block_type.input);
@@ -53,7 +53,9 @@ pub(super) fn push_ast(
                 compiler.add_instruction(TypedInstruction::Nop)?;
                 let label = compiler.pop_label()?;
                 if compiler.take_unreachable() {
-                    compiler.values.truncate(label.type_check_address.as_usize());
+                    compiler
+                        .values
+                        .truncate(label.type_check_address.as_usize());
                     compiler.values.extend_from_slice(&label.output);
                     compiler.values_len.0 = label.return_address.0 + values_len(&label.output)?.0;
                 }

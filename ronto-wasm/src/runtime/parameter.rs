@@ -14,7 +14,7 @@ trait Parameter: Sized + 'static {
 
     fn from_stack(stack: &mut ValueStack) -> Option<Self>;
 
-    fn into_words(self) -> impl IntoIterator<Item=Word>;
+    fn into_words(self) -> impl IntoIterator<Item = Word>;
 }
 
 pub(crate) mod sealed {
@@ -124,7 +124,7 @@ impl Parameter for () {
         Some(())
     }
 
-    fn into_words(self) -> impl IntoIterator<Item=Word> {
+    fn into_words(self) -> impl IntoIterator<Item = Word> {
         iter::empty()
     }
 }
@@ -160,7 +160,7 @@ impl<T: ValueInner> Parameter for T {
         stack.pop()
     }
 
-    fn into_words(self) -> impl IntoIterator<Item=Word> {
+    fn into_words(self) -> impl IntoIterator<Item = Word> {
         self.to_words()
     }
 }
@@ -187,7 +187,6 @@ macro_rules! pop_reversed {
         pop_reversed!($stack [$($rest)*] [$one $($acc)*])
     };
 }
-
 
 macro_rules! impl_param_for_tuple {
     ($(($T0:literal $(, $T:literal)* $(,)?))+) => {paste::paste! {
