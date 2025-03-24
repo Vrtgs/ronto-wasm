@@ -10,9 +10,9 @@ use crate::parser::{DataIndex, Decode, ExternIndex, FunctionDefinition, Function
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryFault;
 use crate::runtime::parameter::sealed::SealedInput;
-use crate::runtime::{values_len, ReferenceValue, Store, Trap, Value, WasmContext};
+use crate::runtime::{values_len, CompilerFlags, ReferenceValue, Store, Trap, Value, ValueStack, WasmContext, WordStore};
 use crate::vector::{vector_from_vec, Index, WasmVec};
-use crate::Stack;
+use crate::{runtime, Stack, VirtualMachine};
 use anyhow::{bail, ensure, Context};
 use std::cmp::PartialEq;
 use std::io::Read;
@@ -171,8 +171,10 @@ enum CompiledInstruction {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct FunctionBody {
+pub struct WasmFunction {
     instructions: WasmVec<CompiledInstruction>,
+    pre_compiled_locals: WasmVec<runtime::Word>,
+    parameters_len: Index,
 }
 
 pub(crate) struct WasmCompilationContext<'a> {
@@ -204,6 +206,8 @@ impl Label {
 }
 
 pub(crate) struct ActiveCompilation<'a, 'env> {
+    flags: &'env CompilerFlags,
+    function_index: FunctionIndex,
     context: &'a WasmCompilationContext<'env>,
     expected_output: &'env WasmVec<ValueType>,
     instructions: Vec<CompiledInstruction>,
@@ -472,7 +476,7 @@ impl ActiveCompilation<'_, '_> {
     }
 
 
-    fn compile(mut self) -> anyhow::Result<FunctionBody> {
+    fn compile(mut self) -> anyhow::Result<WasmFunction> {
         if !self.hit_unreachable() {
             self.pop_slice(self.expected_output)?;
             ensure!(self.values.is_empty(), "too many values on the stack before function return");
@@ -481,14 +485,38 @@ impl ActiveCompilation<'_, '_> {
         optimize_instructions::optimize(&mut self);
         let instructions = vector_from_vec(std::mem::take(&mut self.instructions))
             .context("function too long")?;
-        Ok(FunctionBody { instructions })
+
+        let type_id = self.context.function_signatures.get(self.function_index.0).unwrap();
+        let r#type = self.context.types.get(type_id.0).unwrap();
+        let parameters_len = values_len(&r#type.parameters)?;
+
+        let mut locals = ValueStack::new();
+
+        self.locals.iter().for_each(|&(ty, _)| {
+            match Value::new(ty) {
+                Value::I32(val) => val.push_words(&mut locals.0),
+                Value::I64(val) => val.push_words(&mut locals.0),
+                Value::F32(val) => val.push_words(&mut locals.0),
+                Value::F64(val) => val.push_words(&mut locals.0),
+                Value::V128(val) => val.push_words(&mut locals.0),
+                Value::Ref(ReferenceValue::Function(func)) => func.push_words(&mut locals.0),
+                Value::Ref(ReferenceValue::Extern(extern_idx)) => extern_idx.push_words(&mut locals.0),
+            }
+        });
+
+        Ok(WasmFunction {
+            parameters_len,
+            pre_compiled_locals: vector_from_vec(locals.0)?,
+            instructions,
+        })
     }
 }
 
 impl<'a> WasmCompilationContext<'a> {
     fn start_compilation(
         &self,
-        function: FunctionDefinition,
+        flags: &'a CompilerFlags,
+        (function, index): (FunctionDefinition, FunctionIndex),
         ty: TypeIndex,
     ) -> anyhow::Result<(Expression, ActiveCompilation<'_, 'a>)> {
         let function_signature = self
@@ -509,6 +537,8 @@ impl<'a> WasmCompilationContext<'a> {
         Ok((
             function.body,
             ActiveCompilation {
+                flags,
+                function_index: index,
                 context: self,
                 expected_output: &function_signature.result,
                 instructions: vec![],
@@ -540,13 +570,14 @@ mod label_resolution;
 mod push_ast;
 mod optimize_instructions;
 
-impl FunctionBody {
+impl WasmFunction {
     pub fn new(
-        definition: FunctionDefinition,
+        options: &CompilerFlags,
+        definition: (FunctionDefinition, FunctionIndex),
         ty: TypeIndex,
         compiler: &mut WasmCompilationContext,
     ) -> anyhow::Result<Self> {
-        let (expr, mut active_compilation) = compiler.start_compilation(definition, ty)?;
+        let (expr, mut active_compilation) = compiler.start_compilation(options, definition, ty)?;
 
         let desugared = desugar::desugar(expr, &mut active_compilation)?;
         let labeled = label_resolution::resolve(desugared, &mut active_compilation)?;
@@ -555,7 +586,22 @@ impl FunctionBody {
         active_compilation.compile()
     }
 
-    pub(crate) fn eval(&self, context: &mut WasmContext) -> ExecutionResult {
+    pub(crate) fn eval(&self, virtual_machine: &VirtualMachine, stack: &mut ValueStack, call_depth: usize) -> ExecutionResult {
+        let new_stack_len = stack.len() - self.parameters_len.as_usize();
+        let mut locals = Vec::with_capacity(
+            self.parameters_len.as_usize() + self.pre_compiled_locals.len()
+        );
+        locals.extend_from_slice(&stack.0[new_stack_len..]);
+        locals.extend_from_slice(&self.pre_compiled_locals);
+        stack.0.truncate(new_stack_len);
+
+        let context = &mut WasmContext {
+            virtual_machine,
+            locals: WasmVec::from_trusted_box(locals.into_boxed_slice()),
+            stack,
+            call_depth,
+        };
+
         let bp = Index::from_usize(context.stack.len());
         let mut ip = Index::ZERO;
 
@@ -601,6 +647,7 @@ impl FunctionBody {
                 CompiledInstruction::Untyped(instr) => instr.execute(context)?,
                 CompiledInstruction::Typed(instr) => instr.execute(context)?,
             }
+
             let Some(next) = ip.0.checked_add(1) else {
                 break;
             };

@@ -4,14 +4,14 @@ use super::typed_instruction_code::{
 };
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::parser::{
-    DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex, MemoryArgument,
+    DataIndex, Decode, FunctionIndex, GlobalIndex, LabelIndex, LocalIndex,
     MemoryIndex, ReferenceType, TableIndex, TagByte, TypeIndex, TypeInfo, ValueType,
 };
 use crate::read_tape::ReadTape;
 use crate::runtime::memory_buffer::MemoryError;
-use crate::runtime::{Trap, WasmContext};
+use crate::runtime::{memory_buffer, Trap, WasmContext};
 use crate::vector::{Index, WasmVec};
-use anyhow::{bail, Context};
+use anyhow::{bail, ensure, Context};
 use std::convert::Infallible;
 use std::io::Read;
 use std::marker::PhantomData;
@@ -665,6 +665,66 @@ fn splat64(v: u64) -> u128 {
     ((v as u128) << 64) | v as u128
 }
 
+trait PrimitiveInt: Copy {
+    const BITS: Index;
+}
+
+macro_rules! impl_bits {
+    ($($ty: literal)*) => {
+        paste::paste!{$(
+            impl PrimitiveInt for [<u $ty>] {
+                const BITS: Index = Index($ty);
+            }
+            
+            type [<MemoryArgument $ty>] = MemoryArgument<[<u $ty>]>;
+        )*}
+    };
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct MemoryArgument<T> {
+    offset: Index,
+    align: PhantomData<T>,
+}
+
+impl<T> Clone for MemoryArgument<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for MemoryArgument<T> {}
+
+impl_bits! {
+    8
+    16
+    32
+    64
+    128
+}
+
+impl<T: PrimitiveInt> Decode for MemoryArgument<T> {
+    fn decode(file: &mut ReadTape<impl Read>) -> anyhow::Result<Self> {
+        let align = Index::decode(file)?;
+        let offset = Index::decode(file)?;
+        ensure!(align < T::BITS, "invalid memory argument");
+        Ok(MemoryArgument {
+            offset,
+            align: PhantomData,
+        })
+    }
+}
+
+impl<B> memory_buffer::MemoryArgument for MemoryArgument<B> {
+    fn offset(self) -> Index {
+        self.offset
+    }
+
+    fn align(self) -> usize {
+        1
+    }
+}
+
+
 instruction! {
     ControlFlow {
         ("block",          Block) => 0x02 (BlockType),
@@ -711,44 +771,44 @@ instruction! {
         // Memory Instructions
 
         // Primitive load
-        ("i32.load",        I32Load) => 0x28 (MemoryArgument) code: load!(u32),
-        ("i64.load",        I64Load) => 0x29 (MemoryArgument) code: load!(u64),
-        ("f32.load",        F32Load) => 0x2a (MemoryArgument) code: load!(f32),
-        ("f64.load",        F64Load) => 0x2b (MemoryArgument) code: load!(f64),
+        ("i32.load",        I32Load) => 0x28 (MemoryArgument32) code: load!(u32),
+        ("i64.load",        I64Load) => 0x29 (MemoryArgument64) code: load!(u64),
+        ("f32.load",        F32Load) => 0x2a (MemoryArgument32) code: load!(f32),
+        ("f64.load",        F64Load) => 0x2b (MemoryArgument64) code: load!(f64),
 
         // # Casting load
 
         // ## i32
-        ("i32.load8_s",   I32LoadI8) => 0x2c (MemoryArgument) code: load!(i32 <==  i8),
-        ("i32.load8_u",   I32LoadU8) => 0x2d (MemoryArgument) code: load!(i32 <==  u8),
-        ("i32.load16_s", I32LoadI16) => 0x2e (MemoryArgument) code: load!(i32 <== i16),
-        ("i32.load16_u", I32LoadU16) => 0x2f (MemoryArgument) code: load!(i32 <== u16),
+        ("i32.load8_s",   I32LoadI8) => 0x2c (MemoryArgument8 ) code: load!(i32 <==  i8),
+        ("i32.load8_u",   I32LoadU8) => 0x2d (MemoryArgument8 ) code: load!(i32 <==  u8),
+        ("i32.load16_s", I32LoadI16) => 0x2e (MemoryArgument16) code: load!(i32 <== i16),
+        ("i32.load16_u", I32LoadU16) => 0x2f (MemoryArgument16) code: load!(i32 <== u16),
 
         // ## i64
-        ("i64.load8_s",   I64LoadI8) => 0x30 (MemoryArgument) code: load!(i64 <==  i8),
-        ("i64.load8_u",   I64LoadU8) => 0x31 (MemoryArgument) code: load!(i64 <==  u8),
-        ("i64.load16_s", I64LoadI16) => 0x32 (MemoryArgument) code: load!(i64 <== i16),
-        ("i64.load16_u", I64LoadU16) => 0x33 (MemoryArgument) code: load!(i64 <== u16),
-        ("i64.load32_s", I64LoadI32) => 0x34 (MemoryArgument) code: load!(i64 <== i32),
-        ("i64.load32_u", I64LoadU32) => 0x35 (MemoryArgument) code: load!(i64 <== u32),
+        ("i64.load8_s",   I64LoadI8) => 0x30 (MemoryArgument8 ) code: load!(i64 <==  i8),
+        ("i64.load8_u",   I64LoadU8) => 0x31 (MemoryArgument8 ) code: load!(i64 <==  u8),
+        ("i64.load16_s", I64LoadI16) => 0x32 (MemoryArgument16) code: load!(i64 <== i16),
+        ("i64.load16_u", I64LoadU16) => 0x33 (MemoryArgument16) code: load!(i64 <== u16),
+        ("i64.load32_s", I64LoadI32) => 0x34 (MemoryArgument32) code: load!(i64 <== i32),
+        ("i64.load32_u", I64LoadU32) => 0x35 (MemoryArgument32) code: load!(i64 <== u32),
 
         // Primitive store
-        ("i32.store",      I32Store) => 0x36 (MemoryArgument) code: store!(i32),
-        ("i64.store",      I64Store) => 0x37 (MemoryArgument) code: store!(i64),
-        ("f32.store",      F32Store) => 0x38 (MemoryArgument) code: store!(f32),
-        ("f64.store",      F64Store) => 0x39 (MemoryArgument) code: store!(f64),
+        ("i32.store",      I32Store) => 0x36 (MemoryArgument32) code: store!(i32),
+        ("i64.store",      I64Store) => 0x37 (MemoryArgument64) code: store!(i64),
+        ("f32.store",      F32Store) => 0x38 (MemoryArgument32) code: store!(f32),
+        ("f64.store",      F64Store) => 0x39 (MemoryArgument64) code: store!(f64),
 
         // Casting store
 
         // ## i32
-        ("i32.store8",   I32StoreI8) => 0x3a (MemoryArgument) code: store!(i32 ==>  u8),
-        ("i32.store16", I32StoreI16) => 0x3b (MemoryArgument) code: store!(i32 ==> u16),
+        ("i32.store8",   I32StoreI8) => 0x3a (MemoryArgument8 ) code: store!(i32 ==>  u8),
+        ("i32.store16", I32StoreI16) => 0x3b (MemoryArgument16) code: store!(i32 ==> u16),
 
 
         // ## i64
-        ("i64.store8",   I64StoreI8) => 0x3c (MemoryArgument) code: store!(i64 ==>  u8),
-        ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument) code: store!(i64 ==> u16),
-        ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument) code: store!(i64 ==> u32),
+        ("i64.store8",   I64StoreI8) => 0x3c (MemoryArgument8 ) code: store!(i64 ==>  u8),
+        ("i64.store16", I64StoreI16) => 0x3d (MemoryArgument16) code: store!(i64 ==> u16),
+        ("i64.store32", I64StoreI32) => 0x3e (MemoryArgument32) code: store!(i64 ==> u32),
 
         ("memory.size",  MemorySize) => 0x3f (NullByte) code: Primitive::full(|_, (), ctx| {
             Ok(ctx.mem_size(MemoryIndex::ZERO)?.0)
@@ -968,7 +1028,7 @@ instruction! {
         // Vector Instructions
 
         // ## Vector Memory Instructions
-        ("v128.load",                 V128Load) => 0xfd ->  0 (MemoryArgument) code: load!(i128),
+        ("v128.load",                 V128Load) => 0xfd ->  0 (MemoryArgument128) code: load!(i128),
         // ("v128.load8x8_s",        V128LoadI8x8) => 0xfd ->  1 (MemoryArgument),
         // ("v128.load8x8_u",        V128LoadU8x8) => 0xfd ->  2 (MemoryArgument),
         // ("v128.load16x4_s",      V128LoadI16x4) => 0xfd ->  3 (MemoryArgument),

@@ -1,11 +1,11 @@
-use crate::expression::{Expression, FunctionBody, WasmCompilationContext};
+use crate::expression::{Expression, WasmCompilationContext};
 use crate::parser::InitMode;
 use crate::parser::{
     Data, Element, ExportDescription, FunctionIndex, GlobalIndex, ImportDescription, TypeInfo,
     WasmBinary,
 };
 use crate::runtime::memory_buffer::MemoryBuffer;
-use crate::runtime::{values_len, Body, Constructor, FunctionInner, GlobalValueInner, Import, Linker, ReferenceValue, Table, Value, ValueInner, ValueStack, WasmFunction, WordStore};
+use crate::runtime::{Body, CompilerFlags, Constructor, FunctionInner, GlobalValueInner, Import, Linker, ReferenceValue, Table, Value, ValueInner, WasmFunction};
 use crate::vector::{vector_from_vec, WasmVec};
 use crate::Index;
 use anyhow::{anyhow, bail, ensure, Context};
@@ -76,7 +76,7 @@ impl Store {
         Ok(this)
     }
 
-    pub fn with_linker(binary: WasmBinary, linker: &Linker) -> anyhow::Result<Self> {
+    pub fn with_linker_and_options(binary: WasmBinary, options: CompilerFlags, linker: &Linker) -> anyhow::Result<Self> {
         let sections = binary.sections;
 
         let types = sections.r#type.map(|sec| sec.functions).unwrap_or_default();
@@ -170,6 +170,9 @@ impl Store {
             tables,
         };
 
+        let import_offset = Index::try_from_usize(imported_functions.len())
+            .context("too many imported functions, overflowed index")?;
+
         let functions = imported_functions
             .into_iter()
             .flatten()
@@ -178,34 +181,11 @@ impl Store {
                 wasm_defined_functions
                     .into_iter()
                     .zip(wasm_function_types)
-                    .map(|(def, r#type)| {
-                        let parameters = &compiler.types.get(r#type.0)
-                            .context("invalid function type")?
-                            .parameters;
-
-                        let parameters_len = values_len(parameters)?;
-
-                        let mut locals = ValueStack::new();
-
-                        def.locals.iter().for_each(|&ty| {
-                            match Value::new(ty) {
-                                Value::I32(val) => val.push_words(&mut locals.0),
-                                Value::I64(val) => val.push_words(&mut locals.0),
-                                Value::F32(val) => val.push_words(&mut locals.0),
-                                Value::F64(val) => val.push_words(&mut locals.0),
-                                Value::V128(val) => val.push_words(&mut locals.0),
-                                Value::Ref(ReferenceValue::Function(func)) => func.push_words(&mut locals.0),
-                                Value::Ref(ReferenceValue::Extern(extern_idx)) => extern_idx.push_words(&mut locals.0),
-                            }
-                        });
-
+                    .zip((import_offset.0..).map(Index).map(FunctionIndex))
+                    .map(|((def, r#type), function_index)| {
                         Ok(FunctionInner {
                             r#type,
-                            body: Body::WasmDefined(WasmFunction {
-                                parameters_len,
-                                locals: vector_from_vec(locals.0).context("too many locals")?,
-                                body: FunctionBody::new(def, r#type, &mut compiler)?,
-                            }),
+                            body: Body::WasmDefined(WasmFunction::new(&options, (def, function_index), r#type, &mut compiler)?),
                         })
                     }),
             );
@@ -352,6 +332,10 @@ impl Store {
                 Box::new(table_setter) as Constructor,
             ],
         )
+    }
+
+    pub fn with_linker(binary: WasmBinary, linker: &Linker) -> anyhow::Result<Self> {
+        Self::with_linker_and_options(binary, CompilerFlags::default(), linker)
     }
 
     pub fn new(binary: WasmBinary) -> anyhow::Result<Self> {

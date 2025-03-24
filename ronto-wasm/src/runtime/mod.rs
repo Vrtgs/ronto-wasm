@@ -1,9 +1,9 @@
-use crate::expression::FunctionBody;
+use crate::expression::WasmFunction;
 use crate::parser::{
     DataIndex, ExportDescription, ExternIndex, FunctionIndex, GlobalIndex, GlobalType, LocalIndex,
-    MemoryArgument, MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, ValueType,
+    MemoryIndex, ReferenceType, TableIndex, TableType, TypeIndex, ValueType,
 };
-use crate::runtime::memory_buffer::{MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
+use crate::runtime::memory_buffer::{MemoryArgument, MemoryBuffer, MemoryError, MemoryFault, OutOfMemory};
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
 use crate::vector::{Index, WasmVec};
 use crate::Stack;
@@ -511,12 +511,6 @@ impl Debug for GlobalValueRef<'_> {
     }
 }
 
-struct WasmFunction {
-    parameters_len: Index,
-    locals: WasmVec<Word>,
-    body: FunctionBody,
-}
-
 enum Body {
     WasmDefined(WasmFunction),
     Import(Arc<NativeFunction>),
@@ -548,6 +542,45 @@ impl TryFrom<TableType> for Table {
     }
 }
 
+#[derive(Clone)]
+pub struct CompilerFlags {
+    pub(crate) optimize_nop: bool,
+    pub(crate) dead_code_elimination: bool,
+}
+
+impl CompilerFlags {
+    pub fn aggressive() -> Self {
+        Self {
+            optimize_nop: true,
+            dead_code_elimination: true,
+        }
+    }
+}
+
+impl Default for CompilerFlags {
+    fn default() -> Self {
+        Self::aggressive()
+    }
+}
+
+
+#[derive(Default, Clone)]
+pub struct VirtualMachineOptionsBuilder {
+    options: VirtualMachineOptions,
+}
+
+impl VirtualMachineOptionsBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn maximum_call_depth(mut self, depth: usize) -> Self {
+        self.options.maximum_call_depth = depth;
+        self
+    }
+}
+
+#[derive(Clone)]
 pub struct VirtualMachineOptions {
     maximum_call_depth: usize,
 }
@@ -607,28 +640,9 @@ impl VirtualMachine {
         stack: &mut ValueStack,
         call_depth: usize,
     ) -> Result<(), Trap> {
-        let locals = match &function.body {
-            Body::WasmDefined(wasm_func) => {
-                let locals = stack
-                    .0
-                    .drain(stack.len() - wasm_func.parameters_len.as_usize()..)
-                    .chain(wasm_func.locals.iter().copied())
-                    .collect::<Box<[_]>>();
-                WasmVec::from_trusted_box(locals)
-            }
-            Body::Import(_) => const { WasmVec::new() }
-        };
-
-        let mut context = WasmContext {
-            virtual_machine: self,
-            locals,
-            stack,
-            call_depth,
-        };
-
         match &function.body {
-            Body::WasmDefined(func) => func.body.eval(&mut context),
-            Body::Import(imp) => imp(&mut context),
+            Body::WasmDefined(func) => func.eval(self, stack, call_depth),
+            Body::Import(imp) => imp(self, stack),
         }
     }
 }
@@ -824,7 +838,7 @@ impl VirtualMachine {
     }
 }
 
-type Word = u32;
+pub(crate) type Word = u32;
 
 #[derive(Debug)]
 pub(crate) struct ValueStack(pub(crate) Vec<Word>);
@@ -923,7 +937,7 @@ impl<'a> WasmContext<'a> {
     pub(crate) fn mem_load<T: Pod>(
         &self,
         mem_index: MemoryIndex,
-        argument: MemoryArgument,
+        argument: impl MemoryArgument,
         index: Index,
     ) -> Result<T, MemoryFault> {
         self.mem(mem_index)
@@ -933,7 +947,7 @@ impl<'a> WasmContext<'a> {
     pub(crate) fn mem_store<T: Pod>(
         &self,
         mem_index: MemoryIndex,
-        argument: MemoryArgument,
+        argument: impl MemoryArgument,
         index: Index,
         value: &T,
     ) -> Result<(), MemoryFault> {

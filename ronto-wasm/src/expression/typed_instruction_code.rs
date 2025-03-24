@@ -1,6 +1,6 @@
 use crate::expression::{ActiveCompilation, ExecutionResult};
 use crate::parser::{
-    DataIndex, ExternIndex, FunctionIndex, MemoryArgument, MemoryIndex,
+    DataIndex, ExternIndex, FunctionIndex, MemoryIndex,
     ReferenceType, TableIndex, TagByte, TypeIndex,
 };
 use crate::runtime::parameter::sealed::{SealedInput, SealedOutput};
@@ -160,8 +160,8 @@ macro_rules! access_type {
 
 pub(super) struct MemoryAccess<T, const A: usize>(pub PhantomData<[T; A]>);
 
-impl<T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument> for MemoryAccess<T, A> {
-    fn validate(self, &_: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
+impl<B, T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument<B>> for MemoryAccess<T, A> {
+    fn validate(self, &_: &MemoryArgument<B>, compiler: &mut ActiveCompilation) -> bool {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let res = u32::get_from_compiler(compiler);
@@ -181,7 +181,7 @@ impl<T: ValueInner, const A: usize> TypedInstructionCode<&MemoryArgument> for Me
         }
     }
 
-    fn call(self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, &mem_arg: &MemoryArgument<B>, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index::get(context.stack);
@@ -236,15 +236,15 @@ macro_rules! impl_extend {
 impl_extend!(i8 u8 i16 u16);
 impl_extend!(Extend<i64> for i32 Extend<i64> for u32);
 
-impl<T: ValueInner, E: Extend<T>, const A: usize> TypedInstructionCode<&MemoryArgument>
+impl<B, T: ValueInner, E: Extend<T>, const A: usize> TypedInstructionCode<&MemoryArgument<B>>
 for CastingMemoryAccess<T, E, A>
 {
     #[inline(always)]
-    fn validate(self, mem_arg: &MemoryArgument, compiler: &mut ActiveCompilation) -> bool {
+    fn validate(self, mem_arg: &MemoryArgument<B>, compiler: &mut ActiveCompilation) -> bool {
         MemoryAccess::<T, A>::validate(MemoryAccess(PhantomData), mem_arg, compiler)
     }
 
-    fn call(self, &mem_arg: &MemoryArgument, context: &mut WasmContext) -> ExecutionResult {
+    fn call(self, &mem_arg: &MemoryArgument<B>, context: &mut WasmContext) -> ExecutionResult {
         match access_type!(@fetch A) {
             AccessType::Get => {
                 let index = Index::get(context.stack);
@@ -284,3 +284,4 @@ impl TypedInstructionCode<(&DataIndex, &TagByte<0x00>)> for MemoryInit {
 }
 
 pub(super) use access_type;
+use crate::expression::definitions::MemoryArgument;

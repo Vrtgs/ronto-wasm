@@ -1,4 +1,3 @@
-use crate::parser;
 use crate::parser::Limit;
 use crate::vector::Index;
 use bytemuck::Pod;
@@ -49,16 +48,6 @@ pub enum MemoryError {
 pub(crate) trait MemoryArgument: Copy {
     fn offset(self) -> Index;
     fn align(self) -> usize;
-}
-
-impl MemoryArgument for parser::MemoryArgument {
-    fn offset(self) -> Index {
-        self.offset
-    }
-
-    fn align(self) -> usize {
-        1 << self.align.0
-    }
 }
 
 #[derive(Copy, Clone)]

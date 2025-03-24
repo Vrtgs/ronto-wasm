@@ -3,9 +3,8 @@ use crate::expression::{ActiveCompilation, CompiledInstruction, JumpType};
 use crate::Index;
 use std::iter;
 
-pub fn optimize(compiler: &mut ActiveCompilation) {
+fn optimize_nop(compiler: &mut ActiveCompilation) {
     let instructions = &mut compiler.instructions;
-
     let is_nop = |instruction: &CompiledInstruction| {
         matches!(
             instruction,
@@ -50,4 +49,16 @@ pub fn optimize(compiler: &mut ActiveCompilation) {
 
         true
     });
+}
+
+pub fn optimize(_compiler: &mut ActiveCompilation) {
+    macro_rules! from_flags {
+        ($($flag:ident)*) => {
+            $(if _compiler.flags.$flag {
+                $flag(_compiler);
+            })*
+        };
+    }
+
+    from_flags!(optimize_nop);
 }

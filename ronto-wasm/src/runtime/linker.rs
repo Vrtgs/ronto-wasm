@@ -1,7 +1,8 @@
-use crate::parser::{MemoryIndex, ValueType};
+use crate::parser::ValueType;
 use crate::runtime::memory_buffer::MemoryBuffer;
 use crate::runtime::parameter::{FunctionInput, FunctionOutput};
-use crate::runtime::{Trap, Value, WasmContext};
+use crate::runtime::{Trap, Value, ValueStack};
+use crate::{Index, VirtualMachine};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use thiserror::Error;
 #[error("namespace collision during linker creation")]
 pub struct NameSpaceCollision(());
 
-pub(super) type NativeFunction = dyn Fn(&mut WasmContext) -> Result<(), Trap> + Send + Sync;
+pub(super) type NativeFunction = dyn Fn(&VirtualMachine, &mut ValueStack) -> Result<(), Trap> + Send + Sync;
 
 pub(super) type SubTypeCheck = fn(&[ValueType]) -> bool;
 
@@ -58,12 +59,12 @@ impl<T: 'static + Send + Sync> ModuleImportsBuilder<T> {
         fun: impl Fn(&T, Option<&MemoryBuffer>, In) -> Result<Out, Trap> + Send + Sync + 'static,
     ) -> Result<Self, NameSpaceCollision> {
         let data = Arc::clone(&self.data);
-        let function = Arc::new(move |context: &mut WasmContext| {
+        let function = Arc::new(move |vm: &VirtualMachine, stack: &mut ValueStack| {
             std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let input = In::get(context.stack);
-                let mem = context.mem(MemoryIndex::ZERO).ok();
+                let input = In::get(stack);
+                let mem = vm.store.memory.get(Index(0));
                 let output = fun(&data, mem, input);
-                output.map(|output| Out::push(output, context.stack))
+                output.map(|output| Out::push(output, stack))
             }))
                 .map_err(|_| Trap::new())?
         });

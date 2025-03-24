@@ -750,12 +750,6 @@ decodable! {
 
     #[derive(Debug)]
     struct DataCountSection(u32);
-
-    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-    struct MemoryArgument {
-        align: Index,
-        offset: Index,
-    }
 }
 
 use crate::runtime::parameter::fmt_ty_vec;

@@ -10,7 +10,7 @@ pub(super) fn push_ast(
     compiler: &mut ActiveCompilation,
 ) -> anyhow::Result<()> {
     for instruction in expression {
-        if compiler.hit_unreachable() && !matches!(instruction, ResolvedInstruction::End) {
+        if compiler.flags.dead_code_elimination && (compiler.hit_unreachable() && !matches!(instruction, ResolvedInstruction::End)) {
             continue;
         }
 
